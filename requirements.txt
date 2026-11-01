@@ -1,0 +1,4 @@
+customtkinter>=6.0.0
+Pillow>=10.0.0
+tkinterdnd2>=0.7.0
+
