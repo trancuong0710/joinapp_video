@@ -1,3 +1,6 @@
+from youtube_downloader import ensure_ffmpeg_path
+ensure_ffmpeg_path()
+
 import json
 import os
 import subprocess

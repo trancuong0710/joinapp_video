@@ -29,6 +29,7 @@ from youtube_downloader import (
     ensure_ffmpeg_path,
     format_bytes as yt_format_bytes
 )
+from video_cutter import VideoCutter, parse_time_str, format_time_hms
 
 # Supported video extensions
 SUPPORTED_EXTENSIONS = (
@@ -54,13 +55,16 @@ class VideoJoinerApp(DragDropCTk):
             pass
 
         # Window configuration
-        self.title("Video Toolkit Pro - Nối Video & Tải YouTube")
-        self.geometry("1140x840")
-        self.minsize(960, 700)
+        self.title("Video Toolkit Pro - Nối Video • Cắt Video • Tải YouTube")
+        self.geometry("1160x860")
+        self.minsize(980, 720)
 
         # Theme & Styling
         ctk.set_appearance_mode("Dark")
         ctk.set_default_color_theme("blue")
+
+        # Active View State: "joiner", "cutter", or "youtube"
+        self.current_view: str = "joiner"
 
         # Joiner State
         self.video_list: List[VideoInfo] = []
@@ -71,8 +75,17 @@ class VideoJoinerApp(DragDropCTk):
         self.output_file_path = ""
         self._thumb_cache = {}
 
+        # Cutter State
+        self.cutter = VideoCutter()
+        self.is_cutting = False
+        self.cut_input_video: Optional[VideoInfo] = None
+        self.cut_output_file_path = ""
+        self.cut_start_sec: float = 0.0
+        self.cut_end_sec: float = 0.0
+        self.cut_selected_audio_idx: int = 0
+        self.cut_thumb_cache = {}
+
         # YouTube State
-        self.current_view: str = "joiner"  # "joiner" or "youtube"
         self.yt_current_info: Optional[YouTubeVideoInfo] = None
         self.yt_is_fetching: bool = False
         self.yt_is_downloading: bool = False
@@ -95,8 +108,10 @@ class VideoJoinerApp(DragDropCTk):
 
         # Keybindings
         self.bind("<Control-Key-1>", lambda e: self._switch_view("joiner"))
-        self.bind("<Control-Key-2>", lambda e: self._switch_view("youtube"))
+        self.bind("<Control-Key-2>", lambda e: self._switch_view("cutter"))
+        self.bind("<Control-Key-3>", lambda e: self._switch_view("youtube"))
         self.bind("<Control-Key-d>", lambda e: self._switch_view("youtube"))
+        self.bind("<Control-Key-x>", lambda e: self._switch_view("cutter"))
 
         # Handle window close cleanup
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -130,6 +145,18 @@ class VideoJoinerApp(DragDropCTk):
                     self._on_yt_download_cancelled()
                 elif event_type == "yt_error":
                     self._on_yt_download_error(data)
+                # Cutter events
+                elif event_type == "cut_probe_done":
+                    self._on_cut_probe_done(data)
+                elif event_type == "cut_probe_error":
+                    self._on_cut_probe_error(data)
+                elif event_type == "cut_progress":
+                    pct, msg = data
+                    self._on_cut_progress(pct, msg)
+                elif event_type == "cut_complete":
+                    self._on_cut_complete(data)
+                elif event_type == "cut_error":
+                    self._on_cut_error(data)
         except queue.Empty:
             pass
         finally:
@@ -147,9 +174,15 @@ class VideoJoinerApp(DragDropCTk):
         if not raw_data:
             return
         files = self.tk.splitlist(raw_data)
-        if self.current_view != "joiner":
-            self._switch_view("joiner")
-        self._add_files_by_paths(list(files))
+        if not files:
+            return
+
+        if self.current_view == "cutter":
+            self._load_video_into_cutter(files[0])
+        else:
+            if self.current_view != "joiner":
+                self._switch_view("joiner")
+            self._add_files_by_paths(list(files))
 
     def _init_ui(self):
         self.grid_rowconfigure(1, weight=1)
@@ -177,14 +210,21 @@ class VideoJoinerApp(DragDropCTk):
         self._build_output_and_options_section(self.joiner_view)
         self._build_progress_and_bottom_bar(self.joiner_view)
 
-        # 3B. YouTube Downloader View
+        # 3B. Video Cutter View
+        self.cutter_view = ctk.CTkFrame(self.content_container, fg_color="transparent")
+        self.cutter_view.grid_rowconfigure(2, weight=1)
+        self.cutter_view.grid_columnconfigure(0, weight=1)
+
+        self._build_cutter_view(self.cutter_view)
+
+        # 3C. YouTube Downloader View
         self.youtube_view = ctk.CTkFrame(self.content_container, fg_color="transparent")
         self.youtube_view.grid_rowconfigure(2, weight=1)  # Formats scroll list expands
         self.youtube_view.grid_columnconfigure(0, weight=1)
 
         self._build_youtube_view(self.youtube_view)
 
-        # Show Joiner by default
+        # Show Joiner view by default
         self._switch_view("joiner")
 
     def _build_menu_bar(self):
@@ -193,17 +233,20 @@ class VideoJoinerApp(DragDropCTk):
         # Menu Trình đơn
         menu_app = tk.Menu(menubar, tearoff=0)
         menu_app.add_command(label="🎬 Ghép Video MP4", command=lambda: self._switch_view("joiner"), accelerator="Ctrl+1")
-        menu_app.add_command(label="📥 Tải Video YouTube", command=lambda: self._switch_view("youtube"), accelerator="Ctrl+2")
+        menu_app.add_command(label="✂️ Cắt Video MP4", command=lambda: self._switch_view("cutter"), accelerator="Ctrl+2")
+        menu_app.add_command(label="📥 Tải Video YouTube", command=lambda: self._switch_view("youtube"), accelerator="Ctrl+3")
         menu_app.add_separator()
         menu_app.add_command(label="🚪 Thoát", command=self._on_close, accelerator="Alt+F4")
         menubar.add_cascade(label="Trình đơn", menu=menu_app)
 
         # Menu Công cụ
         menu_tools = tk.Menu(menubar, tearoff=0)
+        menu_tools.add_command(label="✂️ Mở Trình Cắt Video...", command=lambda: self._switch_view("cutter"), accelerator="Ctrl+X")
         menu_tools.add_command(label="📥 Tải Video YouTube...", command=lambda: self._switch_view("youtube"), accelerator="Ctrl+D")
-        menu_tools.add_command(label="➕ Thêm Video...", command=self._on_add_files_clicked)
+        menu_tools.add_separator()
+        menu_tools.add_command(label="➕ Thêm Video Ghép...", command=self._on_add_files_clicked)
         menu_tools.add_command(label="📂 Thêm Thư Mục...", command=self._on_add_folder_clicked)
-        menu_tools.add_command(label="🧹 Xóa danh sách video", command=self._on_clear_all_clicked)
+        menu_tools.add_command(label="🧹 Xóa danh sách video ghép", command=self._on_clear_all_clicked)
         menubar.add_cascade(label="Công cụ", menu=menu_tools)
 
         # Menu Trợ giúp
@@ -216,10 +259,11 @@ class VideoJoinerApp(DragDropCTk):
     def _show_about_dialog(self):
         messagebox.showinfo(
             "Giới thiệu Video Toolkit Pro",
-            "Video Toolkit Pro (Phiên bản Nâng cấp)\n\n"
+            "Video Toolkit Pro (Phiên bản Đa Năng)\n\n"
             "Tính năng chính:\n"
-            "1. Ghép Video MP4 Chuyên Nghiệp: Hỗ trợ đa định dạng, chọn track audio từng video, tăng tốc GPU NVENC/AMF/QSV.\n"
-            "2. Tải Video YouTube: Nhập link, xem danh sách đầy đủ định dạng (Full HD, 4K, MP3/M4A), tải về máy với 1 cú click."
+            "1. 🎬 Ghép Video MP4 Chuyên Nghiệp: Hỗ trợ đa định dạng, chọn track audio từng video, tăng tốc GPU NVENC/AMF/QSV.\n"
+            "2. ✂️ Cắt Video Siêu Tốc: Cắt trích đoạn video chính xác, luôn xuất ra file chuẩn MP4 tương thích 100% mọi thiết bị.\n"
+            "3. 📥 Tải Video YouTube: Nhập link, hiển thị đầy đủ định dạng (Full HD, 4K, MP3/M4A), tải về máy với 1 cú click."
         )
 
     def _build_header(self):
@@ -243,7 +287,7 @@ class VideoJoinerApp(DragDropCTk):
         title_label.grid(row=0, column=1, sticky="w", pady=(8, 0))
 
         sub_text = (
-            f"Ghép Video MP4 Đa Định Dạng • Tải Video & Nhạc YouTube • {self.merger.gpu_label}"
+            f"Ghép Video • Cắt Video MP4 • Tải Video YouTube • Tăng tốc: {self.merger.gpu_label}"
         )
         subtitle_label = ctk.CTkLabel(
             header_frame,
@@ -254,14 +298,14 @@ class VideoJoinerApp(DragDropCTk):
         )
         subtitle_label.grid(row=1, column=1, sticky="w", pady=(0, 8))
 
-        # View Switcher Segmented Button
+        # View Switcher Segmented Button (3 Tabs)
         self.nav_segmented = ctk.CTkSegmentedButton(
             header_frame,
-            values=["🎬 Ghép Video", "📥 Tải YouTube"],
+            values=["🎬 Ghép Video", "✂️ Cắt Video", "📥 Tải YouTube"],
             command=self._on_nav_segmented_clicked,
             font=ctk.CTkFont(size=13, weight="bold"),
             height=34,
-            width=260
+            width=380
         )
         self.nav_segmented.set("🎬 Ghép Video")
         self.nav_segmented.grid(row=0, column=2, rowspan=2, padx=16, pady=10)
@@ -283,19 +327,26 @@ class VideoJoinerApp(DragDropCTk):
         self.theme_switch.configure(text=f"Giao diện {'Tối' if mode == 'Dark' else 'Sáng'}")
 
     def _on_nav_segmented_clicked(self, value: str):
-        if "YouTube" in value:
+        if "Cắt" in value:
+            self._switch_view("cutter")
+        elif "YouTube" in value:
             self._switch_view("youtube")
         else:
             self._switch_view("joiner")
 
     def _switch_view(self, view_name: str):
         self.current_view = view_name
+        self.joiner_view.grid_forget()
+        self.cutter_view.grid_forget()
+        self.youtube_view.grid_forget()
+
         if view_name == "joiner":
-            self.youtube_view.grid_forget()
             self.joiner_view.grid(row=0, column=0, sticky="nsew")
             self.nav_segmented.set("🎬 Ghép Video")
-        else:
-            self.joiner_view.grid_forget()
+        elif view_name == "cutter":
+            self.cutter_view.grid(row=0, column=0, sticky="nsew")
+            self.nav_segmented.set("✂️ Cắt Video")
+        elif view_name == "youtube":
             self.youtube_view.grid(row=0, column=0, sticky="nsew")
             self.nav_segmented.set("📥 Tải YouTube")
 
@@ -304,7 +355,7 @@ class VideoJoinerApp(DragDropCTk):
     def _build_toolbar(self, parent):
         toolbar = ctk.CTkFrame(parent, fg_color="transparent")
         toolbar.grid(row=0, column=0, sticky="ew", padx=20, pady=(12, 8))
-        toolbar.grid_columnconfigure(6, weight=1)
+        toolbar.grid_columnconfigure(7, weight=1)
 
         self.btn_add_files = ctk.CTkButton(
             toolbar,
@@ -369,18 +420,31 @@ class VideoJoinerApp(DragDropCTk):
         )
         self.btn_move_down.grid(row=0, column=4, padx=(0, 8))
 
-        # Direct shortcut button to YouTube Downloader
+        # Cutter shortcut
+        self.btn_open_cutter_shortcut = ctk.CTkButton(
+            toolbar,
+            text="✂️ Cắt Video",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color=("#d35400", "#b94600"),
+            hover_color=("#a03d00", "#873400"),
+            width=115,
+            height=34,
+            command=lambda: self._switch_view("cutter")
+        )
+        self.btn_open_cutter_shortcut.grid(row=0, column=5, padx=(0, 8))
+
+        # YouTube shortcut
         self.btn_open_yt_shortcut = ctk.CTkButton(
             toolbar,
             text="📥 Tải YouTube",
             font=ctk.CTkFont(size=13, weight="bold"),
             fg_color=("#8e44ad", "#6c3483"),
             hover_color=("#732d91", "#5b2c6f"),
-            width=125,
+            width=120,
             height=34,
             command=lambda: self._switch_view("youtube")
         )
-        self.btn_open_yt_shortcut.grid(row=0, column=5, padx=(0, 12))
+        self.btn_open_yt_shortcut.grid(row=0, column=6, padx=(0, 12))
 
         # Summary label
         self.lbl_summary = ctk.CTkLabel(
@@ -390,7 +454,7 @@ class VideoJoinerApp(DragDropCTk):
             text_color=("gray40", "gray70"),
             anchor="e"
         )
-        self.lbl_summary.grid(row=0, column=6, sticky="e", padx=(10, 0))
+        self.lbl_summary.grid(row=0, column=7, sticky="e", padx=(10, 0))
 
     def _build_video_list_area(self, parent):
         list_container = ctk.CTkFrame(parent, corner_radius=10, fg_color=("gray90", "#1e2129"))
@@ -439,7 +503,6 @@ class VideoJoinerApp(DragDropCTk):
         opts_frame.grid(row=2, column=0, sticky="ew", padx=20, pady=(0, 8))
         opts_frame.grid_columnconfigure(1, weight=1)
 
-        # Output save path row
         lbl_out = ctk.CTkLabel(
             opts_frame,
             text="💾 Nơi lưu file MP4 kết quả:",
@@ -498,7 +561,6 @@ class VideoJoinerApp(DragDropCTk):
         )
         self.chk_show_log.pack(side="right")
 
-        # Dynamic options container
         self.settings_row = ctk.CTkFrame(opts_frame, fg_color="transparent")
         self.settings_row.grid(row=2, column=0, columnspan=3, sticky="ew", padx=14, pady=(0, 10))
 
@@ -584,12 +646,10 @@ class VideoJoinerApp(DragDropCTk):
         bottom_container.grid(row=3, column=0, sticky="ew", padx=20, pady=(0, 14))
         bottom_container.grid_columnconfigure(0, weight=1)
 
-        # Real-time progress bar
         self.prog_bar = ctk.CTkProgressBar(bottom_container, height=12, corner_radius=6)
         self.prog_bar.set(0.0)
         self.prog_bar.grid(row=0, column=0, sticky="ew", pady=(0, 6))
 
-        # Status text row
         status_row = ctk.CTkFrame(bottom_container, fg_color="transparent")
         status_row.grid(row=1, column=0, sticky="ew", pady=(0, 10))
         status_row.grid_columnconfigure(0, weight=1)
@@ -611,7 +671,6 @@ class VideoJoinerApp(DragDropCTk):
         )
         self.lbl_time_detail.grid(row=0, column=1, sticky="e")
 
-        # Collapsible FFmpeg Log box
         self.log_textbox = ctk.CTkTextbox(
             bottom_container,
             height=100,
@@ -619,7 +678,6 @@ class VideoJoinerApp(DragDropCTk):
             fg_color=("white", "#14161b")
         )
 
-        # Buttons row
         buttons_row = ctk.CTkFrame(bottom_container, fg_color="transparent")
         buttons_row.grid(row=3, column=0, sticky="ew", pady=(4, 0))
 
@@ -681,7 +739,802 @@ class VideoJoinerApp(DragDropCTk):
         else:
             self.log_textbox.grid_forget()
 
-    # ================= 2. YOUTUBE DOWNLOADER VIEW =================
+    # ================= 2. VIDEO CUTTER VIEW =================
+
+    def _build_cutter_view(self, parent):
+        # Row 0: Top File Selector Card
+        top_card = ctk.CTkFrame(parent, corner_radius=10, fg_color=("gray88", "#232731"))
+        top_card.grid(row=0, column=0, sticky="ew", padx=20, pady=(12, 8))
+        top_card.grid_columnconfigure(1, weight=1)
+
+        lbl_cut_title = ctk.CTkLabel(
+            top_card,
+            text="✂️ CẮT & RÚT GỌN VIDEO (XUẤT ĐỊNH DẠNG MP4 CHUẨN)",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=("#1f6aa5", "#38bdf8")
+        )
+        lbl_cut_title.grid(row=0, column=0, columnspan=4, sticky="w", padx=16, pady=(10, 4))
+
+        lbl_file = ctk.CTkLabel(
+            top_card,
+            text="File video nguồn:",
+            font=ctk.CTkFont(size=13, weight="bold")
+        )
+        lbl_file.grid(row=1, column=0, padx=(16, 8), pady=(0, 8), sticky="w")
+
+        self.cut_entry_file = ctk.CTkEntry(
+            top_card,
+            placeholder_text="Chọn video cần cắt hoặc kéo thả file video vào đây (Hỗ trợ MP4, MKV, AVI, MOV, WEBM...)",
+            height=36,
+            font=ctk.CTkFont(size=13)
+        )
+        self.cut_entry_file.grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=(0, 8))
+
+        self.cut_btn_browse_input = ctk.CTkButton(
+            top_card,
+            text="📁 Chọn Video...",
+            width=130,
+            height=36,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color="#1f6aa5",
+            hover_color="#144870",
+            command=self._on_cut_browse_input_clicked
+        )
+        self.cut_btn_browse_input.grid(row=1, column=2, padx=(0, 8), pady=(0, 8))
+
+        self.cut_btn_clear = ctk.CTkButton(
+            top_card,
+            text="🧹 Xóa",
+            width=70,
+            height=36,
+            fg_color=("gray75", "#2b2f38"),
+            hover_color=("#c0392b", "#962d22"),
+            text_color=("black", "white"),
+            command=self._on_cut_clear_clicked
+        )
+        self.cut_btn_clear.grid(row=1, column=3, padx=(0, 16), pady=(0, 8))
+
+        # Row 1: Video Info Card (Preview & Metadata)
+        self.cut_info_card = ctk.CTkFrame(parent, corner_radius=10, fg_color=("gray90", "#1e2129"))
+        self.cut_info_card.grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 8))
+        self.cut_info_card.grid_columnconfigure(1, weight=1)
+
+        # Placeholder inside info card
+        self.cut_ph_frame = ctk.CTkFrame(self.cut_info_card, fg_color="transparent")
+        self.cut_ph_frame.grid(row=0, column=0, columnspan=3, pady=25, sticky="nsew")
+        self.cut_ph_frame.grid_columnconfigure(0, weight=1)
+
+        lbl_ph = ctk.CTkLabel(
+            self.cut_ph_frame,
+            text="🎞️ Chưa chọn video nào. Hãy bấm '📁 Chọn Video...' hoặc kéo thả file video vào đây.",
+            font=ctk.CTkFont(size=13),
+            text_color=("gray40", "gray65")
+        )
+        lbl_ph.pack()
+
+        # Detailed info widgets inside info card (Initially hidden)
+        self.cut_detail_frame = ctk.CTkFrame(self.cut_info_card, fg_color="transparent")
+        self.cut_detail_frame.grid_columnconfigure(1, weight=1)
+
+        self.cut_lbl_thumb = ctk.CTkLabel(
+            self.cut_detail_frame,
+            text="🎬",
+            font=ctk.CTkFont(size=32),
+            width=150,
+            height=85,
+            corner_radius=6,
+            fg_color=("gray80", "#13151b")
+        )
+        self.cut_lbl_thumb.grid(row=0, column=0, rowspan=3, padx=12, pady=10)
+
+        self.cut_lbl_filename = ctk.CTkLabel(
+            self.cut_detail_frame,
+            text="",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            anchor="w"
+        )
+        self.cut_lbl_filename.grid(row=0, column=1, sticky="w", padx=6, pady=(10, 2))
+
+        self.cut_badges_frame = ctk.CTkFrame(self.cut_detail_frame, fg_color="transparent")
+        self.cut_badges_frame.grid(row=1, column=1, sticky="w", padx=6, pady=(0, 4))
+
+        self.cut_audio_row = ctk.CTkFrame(self.cut_detail_frame, fg_color="transparent")
+        self.cut_audio_row.grid(row=2, column=1, sticky="w", padx=6, pady=(0, 10))
+
+        self.cut_btn_preview_orig = ctk.CTkButton(
+            self.cut_detail_frame,
+            text="▶️ Xem Thử Video Gốc",
+            width=160,
+            height=32,
+            font=ctk.CTkFont(size=12),
+            fg_color=("gray75", "#2b2f38"),
+            hover_color=("gray65", "#3a3f4b"),
+            text_color=("black", "white"),
+            command=self._on_cut_preview_original_clicked
+        )
+        self.cut_btn_preview_orig.grid(row=0, column=2, rowspan=3, padx=16, pady=10, sticky="e")
+
+        # Row 2: Range & Cut Time Setting Card
+        time_card = ctk.CTkFrame(parent, corner_radius=10, fg_color=("gray90", "#1e2129"))
+        time_card.grid(row=2, column=0, sticky="nsew", padx=20, pady=(0, 8))
+        time_card.grid_columnconfigure(0, weight=1)
+
+        # Header of time setting
+        lbl_range_title = ctk.CTkLabel(
+            time_card,
+            text="⏱️ THIẾT LẬP THỜI ĐIỂM CẮT VIDEO:",
+            font=ctk.CTkFont(size=13, weight="bold")
+        )
+        lbl_range_title.grid(row=0, column=0, sticky="w", padx=16, pady=(12, 6))
+
+        # Start Time Controls Row
+        start_row = ctk.CTkFrame(time_card, fg_color="transparent")
+        start_row.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 4))
+        start_row.grid_columnconfigure(2, weight=1)
+
+        lbl_start = ctk.CTkLabel(start_row, text="Bắt đầu (Start):", font=ctk.CTkFont(size=13, weight="bold"), width=120, anchor="w")
+        lbl_start.grid(row=0, column=0, sticky="w")
+
+        self.cut_entry_start = ctk.CTkEntry(start_row, width=100, height=32, font=ctk.CTkFont(size=13, weight="bold"))
+        self.cut_entry_start.insert(0, "00:00:00")
+        self.cut_entry_start.grid(row=0, column=1, padx=(0, 10))
+        self.cut_entry_start.bind("<FocusOut>", self._on_cut_entry_start_changed)
+        self.cut_entry_start.bind("<Return>", self._on_cut_entry_start_changed)
+
+        self.cut_slider_start = ctk.CTkSlider(
+            start_row,
+            from_=0.0,
+            to=100.0,
+            number_of_steps=1000,
+            command=self._on_cut_slider_start_moved,
+            height=16
+        )
+        self.cut_slider_start.set(0.0)
+        self.cut_slider_start.grid(row=0, column=2, sticky="ew", padx=(0, 10))
+
+        # Start quick buttons
+        btn_s_reset = ctk.CTkButton(start_row, text="00:00:00", width=65, height=28, fg_color=("gray80", "#2d3340"), text_color=("black", "white"), command=lambda: self._set_cut_start(0.0))
+        btn_s_reset.grid(row=0, column=3, padx=(0, 4))
+
+        btn_s_m5 = ctk.CTkButton(start_row, text="-5s", width=42, height=28, fg_color=("gray80", "#2d3340"), text_color=("black", "white"), command=lambda: self._adjust_cut_start(-5.0))
+        btn_s_m5.grid(row=0, column=4, padx=(0, 2))
+
+        btn_s_m1 = ctk.CTkButton(start_row, text="-1s", width=42, height=28, fg_color=("gray80", "#2d3340"), text_color=("black", "white"), command=lambda: self._adjust_cut_start(-1.0))
+        btn_s_m1.grid(row=0, column=5, padx=(0, 2))
+
+        btn_s_p1 = ctk.CTkButton(start_row, text="+1s", width=42, height=28, fg_color=("gray80", "#2d3340"), text_color=("black", "white"), command=lambda: self._adjust_cut_start(1.0))
+        btn_s_p1.grid(row=0, column=6, padx=(0, 2))
+
+        btn_s_p5 = ctk.CTkButton(start_row, text="+5s", width=42, height=28, fg_color=("gray80", "#2d3340"), text_color=("black", "white"), command=lambda: self._adjust_cut_start(5.0))
+        btn_s_p5.grid(row=0, column=7)
+
+        # End Time Controls Row
+        end_row = ctk.CTkFrame(time_card, fg_color="transparent")
+        end_row.grid(row=2, column=0, sticky="ew", padx=16, pady=(4, 8))
+        end_row.grid_columnconfigure(2, weight=1)
+
+        lbl_end = ctk.CTkLabel(end_row, text="Kết thúc (End):", font=ctk.CTkFont(size=13, weight="bold"), width=120, anchor="w")
+        lbl_end.grid(row=0, column=0, sticky="w")
+
+        self.cut_entry_end = ctk.CTkEntry(end_row, width=100, height=32, font=ctk.CTkFont(size=13, weight="bold"))
+        self.cut_entry_end.insert(0, "00:00:00")
+        self.cut_entry_end.grid(row=0, column=1, padx=(0, 10))
+        self.cut_entry_end.bind("<FocusOut>", self._on_cut_entry_end_changed)
+        self.cut_entry_end.bind("<Return>", self._on_cut_entry_end_changed)
+
+        self.cut_slider_end = ctk.CTkSlider(
+            end_row,
+            from_=0.0,
+            to=100.0,
+            number_of_steps=1000,
+            command=self._on_cut_slider_end_moved,
+            height=16
+        )
+        self.cut_slider_end.set(100.0)
+        self.cut_slider_end.grid(row=0, column=2, sticky="ew", padx=(0, 10))
+
+        # End quick buttons
+        btn_e_end = ctk.CTkButton(end_row, text="Cuối Video", width=65, height=28, fg_color=("gray80", "#2d3340"), text_color=("black", "white"), command=self._set_cut_end_to_max)
+        btn_e_end.grid(row=0, column=3, padx=(0, 4))
+
+        btn_e_m5 = ctk.CTkButton(end_row, text="-5s", width=42, height=28, fg_color=("gray80", "#2d3340"), text_color=("black", "white"), command=lambda: self._adjust_cut_end(-5.0))
+        btn_e_m5.grid(row=0, column=4, padx=(0, 2))
+
+        btn_e_m1 = ctk.CTkButton(end_row, text="-1s", width=42, height=28, fg_color=("gray80", "#2d3340"), text_color=("black", "white"), command=lambda: self._adjust_cut_end(-1.0))
+        btn_e_m1.grid(row=0, column=5, padx=(0, 2))
+
+        btn_e_p1 = ctk.CTkButton(end_row, text="+1s", width=42, height=28, fg_color=("gray80", "#2d3340"), text_color=("black", "white"), command=lambda: self._adjust_cut_end(1.0))
+        btn_e_p1.grid(row=0, column=6, padx=(0, 2))
+
+        btn_e_p5 = ctk.CTkButton(end_row, text="+5s", width=42, height=28, fg_color=("gray80", "#2d3340"), text_color=("black", "white"), command=lambda: self._adjust_cut_end(5.0))
+        btn_e_p5.grid(row=0, column=7)
+
+        # Duration Summary Banner
+        summary_banner = ctk.CTkFrame(time_card, fg_color=("gray95", "#181a20"), corner_radius=6)
+        summary_banner.grid(row=3, column=0, sticky="ew", padx=16, pady=(4, 12))
+
+        self.cut_lbl_duration_summary = ctk.CTkLabel(
+            summary_banner,
+            text="📊 Độ dài đoạn cắt: 00:00:00 • Từ 00:00:00 đến 00:00:00",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=("#1f6aa5", "#38bdf8")
+        )
+        self.cut_lbl_duration_summary.pack(padx=14, pady=8)
+
+        # Row 3: Output File & Mode Settings Card
+        settings_card = ctk.CTkFrame(parent, corner_radius=10, fg_color=("gray88", "#232731"))
+        settings_card.grid(row=3, column=0, sticky="ew", padx=20, pady=(0, 8))
+        settings_card.grid_columnconfigure(1, weight=1)
+
+        # Output save path row
+        lbl_cut_out = ctk.CTkLabel(
+            settings_card,
+            text="💾 File MP4 kết quả:",
+            font=ctk.CTkFont(size=13, weight="bold")
+        )
+        lbl_cut_out.grid(row=0, column=0, sticky="w", padx=(14, 8), pady=(12, 6))
+
+        self.cut_entry_output = ctk.CTkEntry(
+            settings_card,
+            placeholder_text="Chọn nơi lưu file sau khi cắt (luôn xuất ra định dạng .mp4)...",
+            height=34,
+            font=ctk.CTkFont(size=12)
+        )
+        self.cut_entry_output.grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=(12, 6))
+
+        self.cut_btn_browse_out = ctk.CTkButton(
+            settings_card,
+            text="📁 Chọn Nơi Lưu...",
+            width=130,
+            height=34,
+            fg_color="#27ae60",
+            hover_color="#1e8449",
+            command=self._on_cut_browse_output_clicked
+        )
+        self.cut_btn_browse_out.grid(row=0, column=2, padx=(0, 14), pady=(12, 6))
+
+        # Mode row
+        cut_mode_row = ctk.CTkFrame(settings_card, fg_color="transparent")
+        cut_mode_row.grid(row=1, column=0, columnspan=3, sticky="ew", padx=14, pady=(2, 10))
+
+        lbl_cut_mode = ctk.CTkLabel(cut_mode_row, text="⚡ Chế độ cắt:", font=ctk.CTkFont(size=13, weight="bold"))
+        lbl_cut_mode.pack(side="left", padx=(0, 10))
+
+        self.cut_seg_mode = ctk.CTkSegmentedButton(
+            cut_mode_row,
+            values=[
+                "⚡ Cắt Siêu Tốc (Stream Copy - Khuyên dùng)",
+                "🎯 Mã Hóa Chuẩn Hóa (Frame-Accurate)"
+            ],
+            command=self._on_cut_mode_changed,
+            height=30,
+            font=ctk.CTkFont(size=12, weight="bold")
+        )
+        self.cut_seg_mode.set("⚡ Cắt Siêu Tốc (Stream Copy - Khuyên dùng)")
+        self.cut_seg_mode.pack(side="left", padx=(0, 14))
+
+        self.cut_lbl_mode_hint = ctk.CTkLabel(
+            cut_mode_row,
+            text="✨ Cực nhanh (1 - 2 giây), giữ nguyên 100% chất lượng gốc không nén lại.",
+            font=ctk.CTkFont(size=12),
+            text_color=("#27ae60", "#2ecc71")
+        )
+        self.cut_lbl_mode_hint.pack(side="left")
+
+        # Row 4: Action & Progress Card
+        bottom_card = ctk.CTkFrame(parent, fg_color="transparent")
+        bottom_card.grid(row=4, column=0, sticky="ew", padx=20, pady=(0, 14))
+        bottom_card.grid_columnconfigure(0, weight=1)
+
+        self.cut_progress_bar = ctk.CTkProgressBar(bottom_card, height=12, corner_radius=6)
+        self.cut_progress_bar.set(0.0)
+        self.cut_progress_bar.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+
+        status_row = ctk.CTkFrame(bottom_card, fg_color="transparent")
+        status_row.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        status_row.grid_columnconfigure(0, weight=1)
+
+        self.cut_lbl_status = ctk.CTkLabel(
+            status_row,
+            text="Sẵn sàng cắt video.",
+            font=ctk.CTkFont(size=13),
+            anchor="w"
+        )
+        self.cut_lbl_status.grid(row=0, column=0, sticky="w")
+
+        # Buttons row
+        cut_buttons_row = ctk.CTkFrame(bottom_card, fg_color="transparent")
+        cut_buttons_row.grid(row=2, column=0, sticky="ew")
+
+        self.cut_btn_start = ctk.CTkButton(
+            cut_buttons_row,
+            text="✂️ BẮT ĐẦU CẮT VIDEO",
+            font=ctk.CTkFont(size=15, weight="bold"),
+            fg_color="#2980b9",
+            hover_color="#1f618d",
+            height=42,
+            width=220,
+            command=self._on_start_cut_clicked
+        )
+        self.cut_btn_start.pack(side="left", padx=(0, 10))
+
+        self.cut_btn_cancel = ctk.CTkButton(
+            cut_buttons_row,
+            text="⏹ Hủy Bỏ",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            fg_color="#c0392b",
+            hover_color="#922b21",
+            height=42,
+            width=110,
+            state="disabled",
+            command=self._on_cancel_cut_clicked
+        )
+        self.cut_btn_cancel.pack(side="left", padx=(0, 10))
+
+        self.cut_btn_play_result = ctk.CTkButton(
+            cut_buttons_row,
+            text="▶ Xem File Vừa Cắt",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color="#27ae60",
+            hover_color="#1e8449",
+            height=42,
+            width=160,
+            state="disabled",
+            command=self._on_cut_play_result_clicked
+        )
+        self.cut_btn_play_result.pack(side="right")
+
+        self.cut_btn_open_folder = ctk.CTkButton(
+            cut_buttons_row,
+            text="📂 Mở Thư Mục",
+            font=ctk.CTkFont(size=13),
+            fg_color=("gray75", "#2b2f38"),
+            hover_color=("gray65", "#3a3f4b"),
+            text_color=("black", "white"),
+            height=42,
+            width=140,
+            state="disabled",
+            command=self._on_cut_open_folder_clicked
+        )
+        self.cut_btn_open_folder.pack(side="right", padx=(0, 8))
+
+        self.cut_btn_add_to_joiner = ctk.CTkButton(
+            cut_buttons_row,
+            text="➕ Đưa Vào Ghép Video",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color="#8e44ad",
+            hover_color="#732d91",
+            height=42,
+            width=180,
+            state="disabled",
+            command=self._on_cut_add_to_joiner_clicked
+        )
+        self.cut_btn_add_to_joiner.pack(side="right", padx=(0, 8))
+
+    # ================= Video Cutter Event Handlers =================
+
+    def _load_video_into_cutter(self, file_path: str):
+        file_path = os.path.normpath(file_path.strip())
+        if not os.path.isfile(file_path):
+            messagebox.showwarning("Thông báo", f"Tập tin không tồn tại: {file_path}")
+            return
+
+        self._switch_view("cutter")
+        self.cut_entry_file.delete(0, "end")
+        self.cut_entry_file.insert(0, file_path)
+
+        self.cut_lbl_status.configure(text=f"Đang đọc thông tin video: {os.path.basename(file_path)}...")
+
+        def probe_worker():
+            try:
+                info = probe_video(file_path, self.temp_dir)
+                self._event_queue.put(("cut_probe_done", info))
+            except Exception as e:
+                self._event_queue.put(("cut_probe_error", str(e)))
+
+        threading.Thread(target=probe_worker, daemon=True).start()
+
+    def _on_cut_probe_done(self, info: VideoInfo):
+        self.cut_input_video = info
+        self.cut_start_sec = 0.0
+        self.cut_end_sec = max(0.5, info.duration)
+        self.cut_selected_audio_idx = 0
+
+        # Hide placeholder, show details
+        self.cut_ph_frame.grid_forget()
+        self.cut_detail_frame.grid(row=0, column=0, columnspan=3, sticky="nsew", padx=4, pady=4)
+
+        # Set thumbnail
+        ctk_img = None
+        if info.thumbnail_path and os.path.exists(info.thumbnail_path):
+            try:
+                if info.thumbnail_path not in self.cut_thumb_cache:
+                    pil_img = Image.open(info.thumbnail_path)
+                    self.cut_thumb_cache[info.thumbnail_path] = ctk.CTkImage(
+                        light_image=pil_img,
+                        dark_image=pil_img,
+                        size=(150, 85)
+                    )
+                ctk_img = self.cut_thumb_cache[info.thumbnail_path]
+            except Exception:
+                pass
+
+        if ctk_img:
+            self.cut_lbl_thumb.configure(image=ctk_img, text="")
+        else:
+            self.cut_lbl_thumb.configure(image=None, text="🎬")
+
+        # Filename
+        self.cut_lbl_filename.configure(text=info.filename)
+
+        # Badges
+        for w in self.cut_badges_frame.winfo_children():
+            w.destroy()
+
+        badges_info = [
+            f"⏱️ {info.duration_str}",
+            f"📐 {info.resolution_str} ({info.fps} fps)",
+            f"📦 {info.filesize_str}",
+            f"🎞️ {info.codec.upper()}"
+        ]
+        for b in badges_info:
+            lbl = ctk.CTkLabel(
+                self.cut_badges_frame,
+                text=f" {b} ",
+                font=ctk.CTkFont(size=11),
+                fg_color=("gray85", "#14161b"),
+                corner_radius=4
+            )
+            lbl.pack(side="left", padx=(0, 6))
+
+        # Audio Track controls in Cutter
+        for w in self.cut_audio_row.winfo_children():
+            w.destroy()
+
+        if info.has_multiple_audio:
+            lbl_a = ctk.CTkLabel(self.cut_audio_row, text="🎵 Âm thanh:", font=ctk.CTkFont(size=11, weight="bold"))
+            lbl_a.pack(side="left", padx=(0, 6))
+
+            opts = [t.display_label for t in info.audio_tracks]
+            opts.append("🔇 Tắt âm thanh (Mute)")
+
+            def on_audio_select(val):
+                if val.startswith("🔇"):
+                    self.cut_selected_audio_idx = -1
+                else:
+                    for idx, t in enumerate(info.audio_tracks):
+                        if t.display_label == val:
+                            self.cut_selected_audio_idx = idx
+                            break
+
+            cbo = ctk.CTkOptionMenu(
+                self.cut_audio_row,
+                values=opts,
+                font=ctk.CTkFont(size=11),
+                height=26,
+                width=320,
+                command=on_audio_select
+            )
+            cbo.set(info.audio_tracks[0].display_label)
+            cbo.pack(side="left")
+        elif len(info.audio_tracks) == 1:
+            lbl_a = ctk.CTkLabel(
+                self.cut_audio_row,
+                text=f"🎵 Âm thanh: {info.audio_tracks[0].display_label}",
+                font=ctk.CTkFont(size=11),
+                fg_color=("gray85", "#14161b"),
+                corner_radius=4
+            )
+            lbl_a.pack(side="left", padx=(0, 6))
+
+            mute_var = ctk.BooleanVar(value=False)
+            def on_mute_toggle():
+                self.cut_selected_audio_idx = -1 if mute_var.get() else 0
+
+            chk = ctk.CTkCheckBox(self.cut_audio_row, text="Tắt tiếng", font=ctk.CTkFont(size=11), variable=mute_var, command=on_mute_toggle, width=20)
+            chk.pack(side="left")
+        else:
+            self.cut_selected_audio_idx = -1
+            lbl_a = ctk.CTkLabel(
+                self.cut_audio_row,
+                text="🔇 Video không có tiếng",
+                font=ctk.CTkFont(size=11),
+                fg_color=("gray85", "#14161b"),
+                corner_radius=4
+            )
+            lbl_a.pack(side="left")
+
+        # Configure sliders with actual duration
+        duration = max(0.5, info.duration)
+        self.cut_slider_start.configure(from_=0.0, to=duration)
+        self.cut_slider_start.set(0.0)
+
+        self.cut_slider_end.configure(from_=0.0, to=duration)
+        self.cut_slider_end.set(duration)
+
+        # Configure entries
+        self.cut_entry_start.delete(0, "end")
+        self.cut_entry_start.insert(0, "00:00:00")
+
+        self.cut_entry_end.delete(0, "end")
+        self.cut_entry_end.insert(0, format_time_hms(duration))
+
+        # Auto suggest output path
+        orig_dir = os.path.dirname(info.file_path)
+        base_no_ext = os.path.splitext(info.filename)[0]
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        suggested_out = os.path.join(orig_dir, f"{base_no_ext}_cut_{ts}.mp4")
+        self.cut_entry_output.delete(0, "end")
+        self.cut_entry_output.insert(0, suggested_out)
+        self.cut_output_file_path = suggested_out
+
+        self._update_cut_summary()
+        self.cut_lbl_status.configure(text=f"Đã nạp video thành công: {info.filename}")
+
+    def _on_cut_probe_error(self, err_msg: str):
+        self.cut_lbl_status.configure(text="❌ Lỗi khi đọc file video.")
+        messagebox.showerror("Lỗi đọc video", f"Không thể phân tích video này:\n{err_msg}")
+
+    def _update_cut_summary(self):
+        duration = max(0.0, self.cut_end_sec - self.cut_start_sec)
+        has_sub = (self.cut_start_sec % 1 != 0) or (self.cut_end_sec % 1 != 0) or (duration % 1 != 0)
+        s_str = format_time_hms(self.cut_start_sec, has_sub)
+        e_str = format_time_hms(self.cut_end_sec, has_sub)
+        dur_str = format_time_hms(duration, has_sub)
+
+        self.cut_lbl_duration_summary.configure(
+            text=f"📊 Đoạn cắt dài: {dur_str}  (Từ {s_str}  đến  {e_str})"
+        )
+
+    def _on_cut_slider_start_moved(self, val: float):
+        if val >= self.cut_end_sec:
+            val = max(0.0, self.cut_end_sec - 0.5)
+            self.cut_slider_start.set(val)
+        self.cut_start_sec = val
+        self.cut_entry_start.delete(0, "end")
+        self.cut_entry_start.insert(0, format_time_hms(val))
+        self._update_cut_summary()
+
+    def _on_cut_slider_end_moved(self, val: float):
+        if val <= self.cut_start_sec:
+            val = min(self.cut_input_video.duration if self.cut_input_video else 100.0, self.cut_start_sec + 0.5)
+            self.cut_slider_end.set(val)
+        self.cut_end_sec = val
+        self.cut_entry_end.delete(0, "end")
+        self.cut_entry_end.insert(0, format_time_hms(val))
+        self._update_cut_summary()
+
+    def _on_cut_entry_start_changed(self, event=None):
+        val = parse_time_str(self.cut_entry_start.get())
+        max_limit = self.cut_end_sec - 0.2 if self.cut_end_sec > 0.2 else 0.0
+        val = max(0.0, min(max_limit, val))
+        self.cut_start_sec = val
+        self.cut_slider_start.set(val)
+        self.cut_entry_start.delete(0, "end")
+        self.cut_entry_start.insert(0, format_time_hms(val))
+        self._update_cut_summary()
+
+    def _on_cut_entry_end_changed(self, event=None):
+        val = parse_time_str(self.cut_entry_end.get())
+        max_dur = self.cut_input_video.duration if self.cut_input_video else 3600.0
+        val = max(self.cut_start_sec + 0.2, min(max_dur, val))
+        self.cut_end_sec = val
+        self.cut_slider_end.set(val)
+        self.cut_entry_end.delete(0, "end")
+        self.cut_entry_end.insert(0, format_time_hms(val))
+        self._update_cut_summary()
+
+    def _set_cut_start(self, val: float):
+        self.cut_start_sec = val
+        self.cut_slider_start.set(val)
+        self.cut_entry_start.delete(0, "end")
+        self.cut_entry_start.insert(0, format_time_hms(val))
+        self._update_cut_summary()
+
+    def _set_cut_end_to_max(self):
+        if self.cut_input_video:
+            max_d = self.cut_input_video.duration
+            self.cut_end_sec = max_d
+            self.cut_slider_end.set(max_d)
+            self.cut_entry_end.delete(0, "end")
+            self.cut_entry_end.insert(0, format_time_hms(max_d))
+            self._update_cut_summary()
+
+    def _adjust_cut_start(self, delta: float):
+        new_val = max(0.0, min(self.cut_end_sec - 0.5, self.cut_start_sec + delta))
+        self._set_cut_start(new_val)
+
+    def _adjust_cut_end(self, delta: float):
+        max_d = self.cut_input_video.duration if self.cut_input_video else 3600.0
+        new_val = min(max_d, max(self.cut_start_sec + 0.5, self.cut_end_sec + delta))
+        self.cut_end_sec = new_val
+        self.cut_slider_end.set(new_val)
+        self.cut_entry_end.delete(0, "end")
+        self.cut_entry_end.insert(0, format_time_hms(new_val))
+        self._update_cut_summary()
+
+    def _on_cut_mode_changed(self, mode_str: str):
+        if "Siêu Tốc" in mode_str:
+            self.cut_lbl_mode_hint.configure(
+                text="✨ Cực nhanh (1 - 2 giây), giữ nguyên 100% độ sắc nét gốc (không nén lại).",
+                text_color=("#27ae60", "#2ecc71")
+            )
+        else:
+            self.cut_lbl_mode_hint.configure(
+                text="🎯 Cắt chuẩn xác từng khung hình millisecond (Mã hóa chuẩn H.264 + AAC MP4).",
+                text_color=("#38bdf8", "#1f6aa5")
+            )
+
+    def _on_cut_browse_input_clicked(self):
+        filetypes = [
+            ("Tập tin Video", "*.mp4 *.mkv *.mov *.avi *.flv *.webm *.ts *.m4v *.wmv *.m2ts"),
+            ("Tất cả tập tin", "*.*")
+        ]
+        chosen = filedialog.askopenfilename(title="Chọn video cần cắt", filetypes=filetypes)
+        if chosen:
+            self._load_video_into_cutter(chosen)
+
+    def _on_cut_browse_output_clicked(self):
+        initial_dir = ""
+        initial_file = "video_cat.mp4"
+        current_out = self.cut_entry_output.get().strip()
+        if current_out:
+            initial_dir = os.path.dirname(current_out)
+            initial_file = os.path.basename(current_out)
+        elif self.cut_input_video:
+            initial_dir = os.path.dirname(self.cut_input_video.file_path)
+
+        path = filedialog.asksaveasfilename(
+            title="Chọn nơi lưu file MP4 kết quả",
+            initialdir=initial_dir,
+            initialfile=initial_file,
+            defaultextension=".mp4",
+            filetypes=[("Video MP4 (*.mp4)", "*.mp4")]
+        )
+        if path:
+            if not path.lower().endswith(".mp4"):
+                path += ".mp4"
+            self.cut_output_file_path = path
+            self.cut_entry_output.delete(0, "end")
+            self.cut_entry_output.insert(0, path)
+
+    def _on_cut_clear_clicked(self):
+        self.cut_input_video = None
+        self.cut_entry_file.delete(0, "end")
+        self.cut_entry_output.delete(0, "end")
+        self.cut_detail_frame.grid_forget()
+        self.cut_ph_frame.grid(row=0, column=0, columnspan=3, pady=25, sticky="nsew")
+        self.cut_slider_start.set(0.0)
+        self.cut_slider_end.set(100.0)
+        self.cut_entry_start.delete(0, "end")
+        self.cut_entry_start.insert(0, "00:00:00")
+        self.cut_entry_end.delete(0, "end")
+        self.cut_entry_end.insert(0, "00:00:00")
+        self.cut_lbl_duration_summary.configure(text="📊 Độ dài đoạn cắt: 00:00:00 • Từ 00:00:00 đến 00:00:00")
+        self.cut_lbl_status.configure(text="Sẵn sàng cắt video.")
+        self.cut_progress_bar.set(0.0)
+
+    def _on_cut_preview_original_clicked(self):
+        if self.cut_input_video and os.path.exists(self.cut_input_video.file_path):
+            try:
+                os.startfile(os.path.abspath(self.cut_input_video.file_path))
+            except Exception as e:
+                messagebox.showerror("Lỗi", f"Không thể mở video gốc: {e}")
+
+    def _on_start_cut_clicked(self):
+        if not self.cut_input_video:
+            messagebox.showwarning("Thông báo", "Vui lòng chọn video cần cắt.")
+            return
+
+        out_path = self.cut_entry_output.get().strip()
+        if not out_path:
+            messagebox.showwarning("Thông báo", "Vui lòng chọn nơi lưu file MP4 kết quả.")
+            return
+
+        if not out_path.lower().endswith(".mp4"):
+            out_path += ".mp4"
+            self.cut_entry_output.delete(0, "end")
+            self.cut_entry_output.insert(0, out_path)
+
+        if self.cut_end_sec <= self.cut_start_sec:
+            messagebox.showwarning("Thông báo", "Thời điểm kết thúc phải lớn hơn thời điểm bắt đầu.")
+            return
+
+        self.cut_output_file_path = out_path
+        self.is_cutting = True
+
+        # Lock UI
+        self.cut_btn_start.configure(state="disabled")
+        self.cut_btn_cancel.configure(state="normal")
+        self.cut_btn_play_result.configure(state="disabled")
+        self.cut_btn_open_folder.configure(state="disabled")
+        self.cut_btn_add_to_joiner.configure(state="disabled")
+
+        self.cut_progress_bar.set(0.0)
+        self.cut_lbl_status.configure(text="Đang bắt đầu tiến trình cắt video...")
+
+        is_fast = "Siêu Tốc" in self.cut_seg_mode.get()
+        mode_val = "fast" if is_fast else "encode"
+
+        self.cutter.cut_video_async(
+            input_path=self.cut_input_video.file_path,
+            output_path=self.cut_output_file_path,
+            start_sec=self.cut_start_sec,
+            end_sec=self.cut_end_sec,
+            mode=mode_val,
+            selected_audio_idx=self.cut_selected_audio_idx,
+            on_progress=lambda pct, msg: self._event_queue.put(("cut_progress", (pct, msg))),
+            on_complete=lambda path: self._event_queue.put(("cut_complete", path)),
+            on_error=lambda err: self._event_queue.put(("cut_error", err))
+        )
+
+    def _on_cancel_cut_clicked(self):
+        if messagebox.askyesno("Xác nhận", "Bạn có chắc chắn muốn hủy quá trình cắt video?"):
+            self.cutter.cancel()
+            self.cut_lbl_status.configure(text="Đang hủy tiến trình cắt...")
+
+    def _on_cut_progress(self, pct: float, msg: str):
+        self.cut_progress_bar.set(pct / 100.0)
+        self.cut_lbl_status.configure(text=msg)
+
+    def _on_cut_complete(self, output_path: str):
+        self.is_cutting = False
+        self.cut_progress_bar.set(1.0)
+        self.cut_lbl_status.configure(text="🎉 Cắt video thành công 100%! Đã xuất file MP4 hoàn chỉnh.")
+
+        self.cut_btn_start.configure(state="normal")
+        self.cut_btn_cancel.configure(state="disabled")
+        self.cut_btn_play_result.configure(state="normal")
+        self.cut_btn_open_folder.configure(state="normal")
+        self.cut_btn_add_to_joiner.configure(state="normal")
+
+        ans = messagebox.askyesno(
+            "Cắt Video Thành Công!",
+            f"Đã cắt và lưu file MP4 thành công:\n\n{output_path}\n\nBạn có muốn mở xem ngay không?"
+        )
+        if ans:
+            self._on_cut_play_result_clicked()
+
+    def _on_cut_error(self, err_msg: str):
+        self.is_cutting = False
+        self.cut_lbl_status.configure(text="❌ Quá trình cắt video bị dừng hoặc xảy ra lỗi.")
+        self.cut_btn_start.configure(state="normal")
+        self.cut_btn_cancel.configure(state="disabled")
+        messagebox.showerror("Thông báo cắt video", err_msg)
+
+    def _on_cut_play_result_clicked(self):
+        if self.cut_output_file_path and os.path.exists(self.cut_output_file_path):
+            try:
+                os.startfile(os.path.abspath(self.cut_output_file_path))
+            except Exception as e:
+                messagebox.showerror("Lỗi", f"Không thể mở file: {e}")
+        else:
+            messagebox.showwarning("Thông báo", "File kết quả không tồn tại.")
+
+    def _on_cut_open_folder_clicked(self):
+        if self.cut_output_file_path:
+            abs_p = os.path.abspath(self.cut_output_file_path)
+            if os.path.exists(abs_p):
+                import subprocess
+                subprocess.run(f'explorer /select,"{abs_p}"', shell=True)
+            else:
+                fdir = os.path.dirname(abs_p)
+                if os.path.isdir(fdir):
+                    os.startfile(fdir)
+
+    def _on_cut_add_to_joiner_clicked(self):
+        if not self.cut_output_file_path or not os.path.exists(self.cut_output_file_path):
+            messagebox.showwarning("Thông báo", "File video đã cắt không tồn tại.")
+            return
+
+        self._switch_view("joiner")
+        self._add_files_by_paths([self.cut_output_file_path])
+        messagebox.showinfo(
+            "Thành công",
+            f"Đã thêm đoạn video vừa cắt vào danh sách ghép video:\n{os.path.basename(self.cut_output_file_path)}"
+        )
+
+    # ================= 3. YOUTUBE DOWNLOADER VIEW =================
 
     def _build_youtube_view(self, parent):
         parent.grid_rowconfigure(2, weight=1)  # Formats scroll frame expands
@@ -816,7 +1669,6 @@ class VideoJoinerApp(DragDropCTk):
         formats_outer.grid_rowconfigure(1, weight=1)
         formats_outer.grid_columnconfigure(0, weight=1)
 
-        # Formats Filter Bar
         filter_bar = ctk.CTkFrame(formats_outer, fg_color="transparent")
         filter_bar.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 6))
         filter_bar.grid_columnconfigure(0, weight=1)
@@ -838,7 +1690,6 @@ class VideoJoinerApp(DragDropCTk):
         self.yt_filter_seg.set("Tất cả")
         self.yt_filter_seg.grid(row=0, column=1, sticky="e")
 
-        # Scrollable Formats List
         self.yt_formats_scroll = ctk.CTkScrollableFrame(
             formats_outer,
             fg_color="transparent",
@@ -913,9 +1764,19 @@ class VideoJoinerApp(DragDropCTk):
             command=self._on_yt_open_folder_clicked
         )
 
+        self.yt_btn_cut_this_video = ctk.CTkButton(
+            self.yt_actions_box,
+            text="✂️ Cắt Video Này",
+            width=130,
+            height=30,
+            fg_color=("#d35400", "#b94600"),
+            hover_color=("#a03d00", "#873400"),
+            command=self._on_yt_cut_this_video_clicked
+        )
+
         self.yt_btn_add_to_joiner = ctk.CTkButton(
             self.yt_actions_box,
-            text="➕ Thêm Vào Ghép Video",
+            text="➕ Đưa Vào Ghép Video",
             width=165,
             height=30,
             fg_color="#27ae60",
@@ -1007,7 +1868,6 @@ class VideoJoinerApp(DragDropCTk):
             text_color=("#27ae60", "#2ecc71")
         )
 
-        # Show preview card
         self.yt_lbl_title.configure(text=info.title)
         meta_str = f"📺 Kênh: {info.channel}   •   ⏱ Thời lượng: {info.duration_str}"
         if info.view_count_str:
@@ -1015,7 +1875,6 @@ class VideoJoinerApp(DragDropCTk):
         self.yt_lbl_meta.configure(text=meta_str)
         self.yt_lbl_thumb.configure(image=None, text="🎬")
 
-        # Load thumbnail asynchronously
         if info.thumbnail_url:
             def load_thumb():
                 try:
@@ -1030,8 +1889,6 @@ class VideoJoinerApp(DragDropCTk):
             threading.Thread(target=load_thumb, daemon=True).start()
 
         self.yt_preview_card.grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 8))
-
-        # Render formats
         self._render_yt_formats()
 
     def _on_yt_info_error(self, err_msg: str):
@@ -1093,7 +1950,6 @@ class VideoJoinerApp(DragDropCTk):
         card.grid(row=idx, column=0, sticky="ew", padx=6, pady=4)
         card.grid_columnconfigure(1, weight=1)
 
-        # 1. Badge (Left)
         badge_color = ("#1f6aa5", "#1f6aa5")
         badge_text = item.resolution
         if item.category == "audio_only":
@@ -1116,7 +1972,6 @@ class VideoJoinerApp(DragDropCTk):
         )
         badge.grid(row=0, column=0, rowspan=2, padx=(12, 10), pady=10)
 
-        # 2. Main title & description
         lbl_name = ctk.CTkLabel(
             card,
             text=item.label,
@@ -1138,7 +1993,6 @@ class VideoJoinerApp(DragDropCTk):
         )
         lbl_desc.grid(row=1, column=1, sticky="w", pady=(0, 8))
 
-        # 3. Actions column (Right)
         actions_frame = ctk.CTkFrame(card, fg_color="transparent")
         actions_frame.grid(row=0, column=2, rowspan=2, padx=(10, 12), pady=8, sticky="e")
 
@@ -1193,7 +2047,6 @@ class VideoJoinerApp(DragDropCTk):
             clean_title = "youtube_download"
         default_file = f"{clean_title}_{item.resolution}.{item.ext}"
 
-        # Choose destination
         default_dir = os.path.expanduser("~/Downloads")
         if not os.path.isdir(default_dir):
             default_dir = os.getcwd()
@@ -1217,7 +2070,6 @@ class VideoJoinerApp(DragDropCTk):
         self.yt_cancel_event = threading.Event()
         self.yt_downloaded_file = None
 
-        # Display download card
         self.yt_dl_card.grid(row=3, column=0, sticky="ew", padx=20, pady=(0, 10))
         self.yt_lbl_dl_title.configure(
             text=f"Đang tải: {os.path.basename(save_path)} ({item.resolution})",
@@ -1227,9 +2079,9 @@ class VideoJoinerApp(DragDropCTk):
         self.yt_lbl_dl_details.configure(text="Đang kết nối tới máy chủ YouTube...")
         self.yt_btn_cancel_dl.configure(state="normal")
 
-        # Hide completion action buttons initially
         self.yt_btn_open_file.pack_forget()
         self.yt_btn_open_folder.pack_forget()
+        self.yt_btn_cut_this_video.pack_forget()
         self.yt_btn_add_to_joiner.pack_forget()
 
         def dl_worker():
@@ -1283,12 +2135,11 @@ class VideoJoinerApp(DragDropCTk):
         self.yt_lbl_dl_details.configure(text=f"Đã lưu tại: {final_path}")
         self.yt_btn_cancel_dl.configure(state="disabled")
 
-        # Show completion action buttons
         self.yt_btn_open_file.pack(side="left", padx=(0, 6))
         self.yt_btn_open_folder.pack(side="left", padx=(0, 6))
+        self.yt_btn_cut_this_video.pack(side="left", padx=(0, 6))
         self.yt_btn_add_to_joiner.pack(side="left", padx=(0, 6))
 
-        # Ask to play video
         ans = messagebox.askyesno(
             "Tải YouTube Thành Công!",
             f"Đã tải video/âm thanh thành công:\n\n{final_path}\n\nBạn có muốn mở xem ngay không?"
@@ -1335,21 +2186,25 @@ class VideoJoinerApp(DragDropCTk):
                 if os.path.isdir(fdir):
                     os.startfile(fdir)
 
+    def _on_yt_cut_this_video_clicked(self):
+        if self.yt_downloaded_file and os.path.exists(self.yt_downloaded_file):
+            self._load_video_into_cutter(self.yt_downloaded_file)
+        else:
+            messagebox.showwarning("Thông báo", "File video không tồn tại.")
+
     def _on_yt_add_to_joiner_clicked(self):
         if not self.yt_downloaded_file or not os.path.exists(self.yt_downloaded_file):
             messagebox.showwarning("Thông báo", "File video không tồn tại.")
             return
 
-        # Switch to joiner view
         self._switch_view("joiner")
-        # Add to joiner
         self._add_files_by_paths([self.yt_downloaded_file])
         messagebox.showinfo(
             "Thành công",
             f"Đã thêm video vừa tải vào danh sách ghép video:\n{os.path.basename(self.yt_downloaded_file)}"
         )
 
-    # ================= Video Item Management =================
+    # ================= Video Item Management (Joiner) =================
 
     def _on_add_files_clicked(self):
         filetypes = [
@@ -1693,26 +2548,39 @@ class VideoJoinerApp(DragDropCTk):
             )
             no_audio_label.pack(side="left")
 
-        # 4. Delete Action Column (Right)
+        # 4. Action Column (Right: Cut & Delete)
         right_col = ctk.CTkFrame(card, fg_color="transparent")
         right_col.grid(row=0, column=3, rowspan=2, padx=(0, 10), pady=8, sticky="ns")
+
+        # Quick Cut button
+        btn_cut = ctk.CTkButton(
+            right_col,
+            text="✂️ Cắt",
+            width=55,
+            height=30,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            fg_color=("#d35400", "#b94600"),
+            hover_color=("#a03d00", "#873400"),
+            command=lambda f=video.file_path: self._load_video_into_cutter(f)
+        )
+        btn_cut.pack(side="left", padx=(0, 6))
 
         btn_del = ctk.CTkButton(
             right_col,
             text="❌",
             width=32,
-            height=32,
+            height=30,
             font=ctk.CTkFont(size=12),
             fg_color="transparent",
             hover_color=("#f2dede", "#5c1d1d"),
             text_color=("#c0392b", "#e74c3c"),
             command=lambda idx=index: self._remove_video(idx)
         )
-        btn_del.pack(expand=True)
+        btn_del.pack(side="left")
 
         return card
 
-    # ================= Destination and Export =================
+    # ================= Destination and Export (Joiner) =================
 
     def _on_browse_output_clicked(self):
         initial_dir = ""
@@ -1872,6 +2740,11 @@ class VideoJoinerApp(DragDropCTk):
             if not messagebox.askyesno("Đang nối video", "Tiến trình nối video đang chạy. Bạn có chắc muốn thoát?"):
                 return
             self.merger.cancel()
+
+        if self.is_cutting:
+            if not messagebox.askyesno("Đang cắt video", "Tiến trình cắt video đang chạy. Bạn có chắc muốn thoát?"):
+                return
+            self.cutter.cancel()
 
         if self.yt_is_downloading:
             if not messagebox.askyesno("Đang tải YouTube", "Tiến trình tải video YouTube đang chạy. Bạn có chắc muốn thoát?"):
