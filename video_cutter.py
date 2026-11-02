@@ -3,7 +3,10 @@ import subprocess
 import threading
 import time
 import shutil
+import io
 from typing import Callable, Optional
+from PIL import Image
+
 from video_merger import detect_hardware_encoder
 from youtube_downloader import ensure_ffmpeg_path
 
@@ -56,6 +59,96 @@ def format_time_hms(seconds: float, include_subseconds: bool = False) -> str:
         r_mins = (rounded_total % 3600) // 60
         r_secs = rounded_total % 60
         return f"{r_hrs:02d}:{r_mins:02d}:{r_secs:02d}"
+
+
+class VideoFrameExtractor:
+    """Fast video frame extractor with OpenCV caching and FFmpeg fallback."""
+    def __init__(self):
+        self._current_path: Optional[str] = None
+        self._cap = None
+        self._lock = threading.Lock()
+
+    def set_video(self, path: str):
+        with self._lock:
+            if self._cap is not None:
+                try:
+                    self._cap.release()
+                except Exception:
+                    pass
+                self._cap = None
+            self._current_path = path
+            try:
+                import cv2
+                self._cap = cv2.VideoCapture(path)
+            except Exception:
+                self._cap = None
+
+    def get_frame(self, sec: float, target_w: int = 560, target_h: int = 315) -> Optional[Image.Image]:
+        with self._lock:
+            if not self._current_path or not os.path.exists(self._current_path):
+                return None
+
+            sec = max(0.0, float(sec))
+
+            # 1. Try OpenCV (ultra-fast in-memory seek, ~40-70ms)
+            if self._cap is not None and self._cap.isOpened():
+                try:
+                    import cv2
+                    self._cap.set(cv2.CAP_PROP_POS_MSEC, sec * 1000.0)
+                    ret, frame = self._cap.read()
+                    if ret and frame is not None:
+                        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        img = Image.fromarray(rgb)
+                        img.thumbnail((target_w, target_h), Image.Resampling.LANCZOS)
+                        return img
+                except Exception:
+                    pass
+
+            # 2. Fallback to FFmpeg image2pipe (~120-180ms)
+            try:
+                ensure_ffmpeg_path()
+                startupinfo = None
+                if os.name == 'nt':
+                    startupinfo = subprocess.STARTUPINFO()
+                    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                    startupinfo.wShowWindow = subprocess.SW_HIDE
+
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-ss", str(round(sec, 3)),
+                    "-i", self._current_path,
+                    "-vf", f"scale={target_w}:-1",
+                    "-vframes", "1",
+                    "-q:v", "3",
+                    "-f", "image2pipe",
+                    "-vcodec", "mjpeg",
+                    "-"
+                ]
+                proc = subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    startupinfo=startupinfo,
+                    timeout=3
+                )
+                if proc.stdout:
+                    img = Image.open(io.BytesIO(proc.stdout))
+                    img.thumbnail((target_w, target_h), Image.Resampling.LANCZOS)
+                    return img
+            except Exception:
+                pass
+
+            return None
+
+    def close(self):
+        with self._lock:
+            if self._cap is not None:
+                try:
+                    self._cap.release()
+                except Exception:
+                    pass
+                self._cap = None
+            self._current_path = None
 
 
 class VideoCutter:
