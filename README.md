@@ -66,3 +66,44 @@ py main.py
 - `Ctrl + 2` hoặc `Ctrl + X`: Chuyển sang màn hình **✂️ Cắt Video**
 - `Ctrl + 3` hoặc `Ctrl + D`: Chuyển sang màn hình **📥 Tải Video YouTube**
 - `Enter` trong ô nhập link YouTube: Bắt đầu phân tích & lấy link tải ngay
+
+
+---
+
+## 🏗️ Cấu Trúc Dự Án (Kiến Trúc Module Chuẩn Hóa)
+
+```text
+joinapp_video/
+├── src/
+│   ├── config/              # Hằng số, presets ffmpeg, cấu hình app
+│   ├── utils/               # Tiện ích format bytes, thời gian, filename
+│   ├── core/                # Xử lý media độc lập (FFmpeg, FFprobe, GPU detection)
+│   │   └── youtube/         # Module YouTube, tải stream & dịch phụ đề
+│   └── ui/                  # Tầng giao diện người dùng CustomTkinter
+│       ├── components/      # UI components (VideoCard, FormatCard, SubtitleCard)
+│       ├── views/           # Các màn hình tính năng (MergerView, CutterView, YouTubeView)
+│       └── main_window.py   # Cửa sổ chính & điều phối view
+├── tests/                   # Bộ kiểm thử tự động (Unit Tests)
+├── build_exe.py             # Script đóng gói ra file chạy độc lập (.exe)
+├── build.bat                # Phím tắt click chuột để build exe
+├── main.py                  # Entry point
+└── run.bat                  # Script khởi động nhanh
+```
+
+---
+
+## 🧪 Chạy Kiểm Thử Tự Động (Unit Tests)
+
+```bash
+python -m unittest discover tests
+```
+
+---
+
+## 📦 Đóng gói ra file chạy Windows (.exe)
+
+- Nhấp đúp vào **`build.bat`** hoặc chạy lệnh:
+```bash
+python build_exe.py
+```
+File thực thi hoàn chỉnh sẽ được tạo tại `dist\VideoToolkitPro\VideoToolkitPro.exe`.
