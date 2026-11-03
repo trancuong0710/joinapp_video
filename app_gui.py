@@ -22,12 +22,16 @@ from video_merger import VideoMerger, MergeConfig
 from youtube_downloader import (
     extract_youtube_info,
     download_youtube_video,
+    download_youtube_subtitle,
+    download_and_convert_en_to_vi_subtitle,
     YouTubeVideoInfo,
     YouTubeFormatItem,
+    YouTubeSubtitleItem,
     sanitize_filename,
     DownloadCancelledException,
     ensure_ffmpeg_path,
-    format_bytes as yt_format_bytes
+    format_bytes as yt_format_bytes,
+    find_default_cookie_file
 )
 from video_cutter import VideoCutter, VideoFrameExtractor, parse_time_str, format_time_hms
 
@@ -99,6 +103,7 @@ class VideoJoinerApp(DragDropCTk):
         self.yt_downloaded_file: Optional[str] = None
         self.yt_thumb_image: Optional[ctk.CTkImage] = None
         self.yt_active_filter: str = "Tất cả"
+        self.yt_cookie_file: str = find_default_cookie_file() or ""
 
         # Thread-safe event queue
         self._event_queue = queue.Queue()
@@ -167,6 +172,10 @@ class VideoJoinerApp(DragDropCTk):
                     self._on_yt_info_error(data)
                 elif event_type == "yt_progress":
                     self._on_yt_download_progress(data)
+                elif event_type == "sub_trans_progress":
+                    pct, msg = data
+                    self.yt_progress_bar.set(pct)
+                    self.yt_lbl_dl_details.configure(text=msg)
                 elif event_type == "yt_complete":
                     self._on_yt_download_complete(data)
                 elif event_type == "yt_cancelled":
@@ -1686,12 +1695,72 @@ class VideoJoinerApp(DragDropCTk):
 
         self.yt_lbl_input_status = ctk.CTkLabel(
             input_card,
-            text="Sẵn sàng: Nhập link YouTube và nhấn '🔍 Lấy Link Tải' để hiển thị các định dạng video & âm thanh.",
+            text="Sẵn sàng: Nhập link YouTube và nhấn '🔍 Lấy Link Tải' để hiển thị các định dạng video, âm thanh & phụ đề.",
             font=ctk.CTkFont(size=12),
             text_color=("gray40", "gray70"),
             anchor="w"
         )
-        self.yt_lbl_input_status.grid(row=2, column=0, columnspan=5, sticky="w", padx=16, pady=(0, 10))
+        self.yt_lbl_input_status.grid(row=2, column=0, columnspan=5, sticky="w", padx=16, pady=(0, 6))
+
+        # Row 3: Cookie / Anti-Bot status and management
+        cookie_frame = ctk.CTkFrame(input_card, fg_color=("gray95", "#1c1f26"), corner_radius=6)
+        cookie_frame.grid(row=3, column=0, columnspan=5, sticky="ew", padx=16, pady=(0, 10))
+        cookie_frame.grid_columnconfigure(0, weight=1)
+
+        default_cookie_text = "🍪 Cookie: Chưa nạp (Chế độ khách ẩn danh)"
+        if self.yt_cookie_file and os.path.isfile(self.yt_cookie_file):
+            default_cookie_text = f"🍪 Cookie: {os.path.basename(self.yt_cookie_file)} (Đã kích hoạt)"
+
+        self.yt_lbl_cookie_status = ctk.CTkLabel(
+            cookie_frame,
+            text=default_cookie_text,
+            font=ctk.CTkFont(size=11),
+            text_color=("#27ae60", "#2ecc71") if self.yt_cookie_file else ("gray50", "gray70"),
+            anchor="w"
+        )
+        self.yt_lbl_cookie_status.grid(row=0, column=0, sticky="w", padx=10, pady=4)
+
+        cookie_btn_box = ctk.CTkFrame(cookie_frame, fg_color="transparent")
+        cookie_btn_box.grid(row=0, column=1, sticky="e", padx=6, pady=4)
+
+        self.yt_btn_load_cookie = ctk.CTkButton(
+            cookie_btn_box,
+            text="🍪 Nạp File cookies.txt",
+            width=135,
+            height=26,
+            font=ctk.CTkFont(size=11),
+            fg_color=("#1f6aa5", "#2980b9"),
+            hover_color=("#144870", "#1f618d"),
+            command=self._on_yt_load_cookie_clicked
+        )
+        self.yt_btn_load_cookie.pack(side="left", padx=2)
+
+        self.yt_btn_clear_cookie = ctk.CTkButton(
+            cookie_btn_box,
+            text="❌ Bỏ Cookie",
+            width=80,
+            height=26,
+            font=ctk.CTkFont(size=11),
+            fg_color=("gray75", "#2b2f38"),
+            hover_color=("#c0392b", "#962d22"),
+            text_color=("black", "white"),
+            command=self._on_yt_clear_cookie_clicked
+        )
+        if self.yt_cookie_file:
+            self.yt_btn_clear_cookie.pack(side="left", padx=2)
+
+        self.yt_btn_cookie_help = ctk.CTkButton(
+            cookie_btn_box,
+            text="❓ Cách lấy Cookie",
+            width=120,
+            height=26,
+            font=ctk.CTkFont(size=11),
+            fg_color=("gray75", "#2b2f38"),
+            hover_color=("gray65", "#3a3f4b"),
+            text_color=("black", "white"),
+            command=self._on_yt_cookie_help_clicked
+        )
+        self.yt_btn_cookie_help.pack(side="left", padx=2)
 
         # Row 1: Video Preview Card (Initially hidden)
         self.yt_preview_card = ctk.CTkFrame(parent, corner_radius=10, fg_color=("gray90", "#1e2129"))
@@ -1761,7 +1830,7 @@ class VideoJoinerApp(DragDropCTk):
 
         self.yt_filter_seg = ctk.CTkSegmentedButton(
             filter_bar,
-            values=["Tất cả", "Video MP4", "Chỉ Âm thanh", "Luồng trực tiếp"],
+            values=["Tất cả", "Video MP4", "Chỉ Âm thanh", "Phụ đề (Subtitles)", "Luồng trực tiếp"],
             command=self._on_yt_filter_changed,
             height=28,
             font=ctk.CTkFont(size=12)
@@ -1905,6 +1974,45 @@ class VideoJoinerApp(DragDropCTk):
         )
         self._show_yt_formats_placeholder("Chưa có link tải nào. Hãy dán link YouTube ở trên và nhấn '🔍 Lấy Link Tải'.")
 
+    def _on_yt_load_cookie_clicked(self):
+        chosen = filedialog.askopenfilename(
+            title="Chọn file cookies.txt",
+            filetypes=[("Text files (*.txt)", "*.txt"), ("Tất cả tập tin", "*.*")]
+        )
+        if chosen:
+            self.yt_cookie_file = chosen
+            self.yt_lbl_cookie_status.configure(
+                text=f"🍪 Cookie: {os.path.basename(chosen)} (Đã kích hoạt - sẵn sàng tải)",
+                text_color=("#27ae60", "#2ecc71")
+            )
+            self.yt_btn_clear_cookie.pack(side="left", padx=2, before=self.yt_btn_cookie_help)
+            messagebox.showinfo(
+                "Đã Nạp Cookie Thành Công",
+                f"Đã liên kết file cookie:\n{chosen}\n\nBây giờ bạn có thể lấy link và tải các video YouTube bị yêu cầu xác minh bot một cách dễ dàng!"
+            )
+
+    def _on_yt_clear_cookie_clicked(self):
+        self.yt_cookie_file = ""
+        self.yt_lbl_cookie_status.configure(
+            text="🍪 Cookie: Chưa nạp (Chế độ khách ẩn danh)",
+            text_color=("gray50", "gray70")
+        )
+        self.yt_btn_clear_cookie.pack_forget()
+
+    def _on_yt_cookie_help_clicked(self):
+        msg = (
+            "📌 HƯỚNG DẪN XUẤT FILE COOKIES.TXT VƯỢT BOTGUARD YOUTUBE:\n\n"
+            "Khi YouTube hiện lỗi 'Sign in to confirm you're not a bot', bạn làm theo 3 bước sau:\n\n"
+            "1. Cài tiện ích mở rộng trên Chrome hoặc Edge:\n"
+            "   Tìm tiện ích 'Get cookies.txt LOCALLY' hoặc 'Cookie-Editor' trên Chrome Web Store và cài đặt.\n\n"
+            "2. Xuất Cookie từ YouTube:\n"
+            "   Mở trang https://www.youtube.com (đã đăng nhập tài khoản của bạn) > Bấm vào biểu tượng tiện ích vừa cài > Chọn 'Export' (hoặc Download) để lưu file cookies.txt.\n\n"
+            "3. Nạp vào ứng dụng:\n"
+            "   Bấm nút '🍪 Nạp File cookies.txt' bên cạnh và chọn file vừa lưu (hoặc chỉ cần đặt file tên 'cookies.txt' vào cùng thư mục với phần mềm).\n\n"
+            "💡 Mẹo khác: Bạn cũng có thể tạm thời tắt VPN / Cloudflare WARP hoặc chuyển sang mạng 4G từ điện thoại để đổi IP mới sạch."
+        )
+        messagebox.showinfo("Hướng dẫn Cookie YouTube", msg)
+
     def _on_yt_fetch_clicked(self):
         if self.yt_is_fetching:
             return
@@ -1929,7 +2037,7 @@ class VideoJoinerApp(DragDropCTk):
 
         def fetch_worker():
             try:
-                info = extract_youtube_info(url)
+                info = extract_youtube_info(url, cookiefile=self.yt_cookie_file)
                 self._event_queue.put(("yt_info_done", info))
             except Exception as e:
                 self._event_queue.put(("yt_info_error", str(e)))
@@ -1951,6 +2059,11 @@ class VideoJoinerApp(DragDropCTk):
         meta_str = f"📺 Kênh: {info.channel}   •   ⏱ Thời lượng: {info.duration_str}"
         if info.view_count_str:
             meta_str += f"   •   👁 {info.view_count_str}"
+        if info.subtitles:
+            sub_labels = [s.label.split('(')[0].strip() for s in info.subtitles]
+            meta_str += f"\n📝 Phụ đề: {', '.join(sub_labels)}"
+            if info.only_en_sub:
+                meta_str += "  (✨ Hỗ trợ dịch tự động sang Tiếng Việt .srt)"
         self.yt_lbl_meta.configure(text=meta_str)
         self.yt_lbl_thumb.configure(image=None, text="🎬")
 
@@ -1975,11 +2088,11 @@ class VideoJoinerApp(DragDropCTk):
         self.yt_btn_fetch.configure(state="normal", text="🔍 Lấy Link Tải")
         self.yt_btn_paste.configure(state="normal")
         self.yt_lbl_input_status.configure(
-            text="❌ Không thể lấy thông tin video. Kiểm tra lại đường link hoặc kết nối mạng.",
+            text="❌ Không thể lấy thông tin video. Kiểm tra lại đường link hoặc nạp cookies.txt.",
             text_color=("#c0392b", "#e74c3c")
         )
         self._show_yt_formats_placeholder("Không thể lấy dữ liệu video từ link đã nhập.")
-        messagebox.showerror("Lỗi YouTube", f"Không thể lấy thông tin video từ YouTube:\n\n{err_msg}")
+        messagebox.showerror("Thông báo YouTube", err_msg)
 
     def _on_yt_filter_changed(self, value: str):
         self.yt_active_filter = value
@@ -1990,11 +2103,50 @@ class VideoJoinerApp(DragDropCTk):
         for w in self.yt_formats_scroll.winfo_children():
             w.destroy()
 
-        if not self.yt_current_info or not self.yt_current_info.formats:
-            self._show_yt_formats_placeholder("Không tìm thấy link tải nào cho video này.")
+        if not self.yt_current_info:
+            self._show_yt_formats_placeholder("Không tìm thấy thông tin video.")
             return
 
         filter_val = self.yt_active_filter
+        row_counter = 0
+
+        # Subtitle-only filter
+        if filter_val == "Phụ đề (Subtitles)":
+            if not self.yt_current_info.subtitles:
+                self._show_yt_formats_placeholder("Video này không có phụ đề Tiếng Anh hoặc Tiếng Việt.")
+                return
+            for sub_item in self.yt_current_info.subtitles:
+                self._create_yt_subtitle_card(row_counter, sub_item, self.yt_current_info.only_en_sub)
+                row_counter += 1
+            return
+
+        # When "Tất cả" is selected, render Subtitles at the top if present
+        if filter_val == "Tất cả" and self.yt_current_info.subtitles:
+            sec_lbl = ctk.CTkLabel(
+                self.yt_formats_scroll,
+                text="📝 PHỤ ĐỀ VIDEO (SUBTITLES):",
+                font=ctk.CTkFont(size=12, weight="bold"),
+                text_color=("#1f6aa5", "#38bdf8"),
+                anchor="w"
+            )
+            sec_lbl.grid(row=row_counter, column=0, sticky="w", padx=10, pady=(6, 2))
+            row_counter += 1
+
+            for sub_item in self.yt_current_info.subtitles:
+                self._create_yt_subtitle_card(row_counter, sub_item, self.yt_current_info.only_en_sub)
+                row_counter += 1
+
+            fmt_lbl = ctk.CTkLabel(
+                self.yt_formats_scroll,
+                text="🎬 CÁC ĐỊNH DẠNG VIDEO & ÂM THANH:",
+                font=ctk.CTkFont(size=12, weight="bold"),
+                text_color=("#1f6aa5", "#38bdf8"),
+                anchor="w"
+            )
+            fmt_lbl.grid(row=row_counter, column=0, sticky="w", padx=10, pady=(10, 2))
+            row_counter += 1
+
+        # Format items filtering
         filtered_list = []
         for f in self.yt_current_info.formats:
             if filter_val == "Tất cả":
@@ -2011,12 +2163,109 @@ class VideoJoinerApp(DragDropCTk):
                 if f.direct_url:
                     filtered_list.append(f)
 
-        if not filtered_list:
+        if not filtered_list and (filter_val != "Tất cả" or not self.yt_current_info.subtitles):
             self._show_yt_formats_placeholder(f"Không có định dạng nào thuộc nhóm '{filter_val}'.")
             return
 
-        for idx, item in enumerate(filtered_list):
-            self._create_yt_format_card(idx, item)
+        for item in filtered_list:
+            self._create_yt_format_card(row_counter, item)
+            row_counter += 1
+
+    def _create_yt_subtitle_card(self, row_idx: int, item: YouTubeSubtitleItem, only_en: bool):
+        card = ctk.CTkFrame(
+            self.yt_formats_scroll,
+            corner_radius=8,
+            fg_color=("#edf2f7", "#232731"),
+            border_width=1,
+            border_color=("#27ae60", "#27ae60") if item.lang == "vi" else ("#2980b9", "#2980b9")
+        )
+        card.grid(row=row_idx, column=0, sticky="ew", padx=6, pady=4)
+        card.grid_columnconfigure(0, weight=1)
+
+        top_row = ctk.CTkFrame(card, fg_color="transparent")
+        top_row.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 4))
+        top_row.grid_columnconfigure(1, weight=1)
+
+        is_vi = (item.lang == "vi")
+        badge_text = "🇻🇳 SUB VIỆT" if is_vi else "🔤 SUB ANH"
+        badge_color = ("#27ae60", "#27ae60") if is_vi else ("#2980b9", "#2980b9")
+        badge = ctk.CTkLabel(
+            top_row,
+            text=f" {badge_text} ",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            fg_color=badge_color,
+            text_color="white",
+            corner_radius=4,
+            width=90,
+            height=28
+        )
+        badge.grid(row=0, column=0, padx=(0, 10), sticky="w")
+
+        info_box = ctk.CTkFrame(top_row, fg_color="transparent")
+        info_box.grid(row=0, column=1, sticky="w")
+
+        lbl_name = ctk.CTkLabel(
+            info_box,
+            text=f"Phụ đề {item.label}  •  Định dạng: .SRT",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            anchor="w"
+        )
+        lbl_name.pack(anchor="w")
+
+        lbl_desc = ctk.CTkLabel(
+            info_box,
+            text=f"{item.note}  •  Chuẩn SubRip (.srt) dùng được cho mọi video",
+            font=ctk.CTkFont(size=11),
+            text_color=("gray50", "gray70"),
+            anchor="w"
+        )
+        lbl_desc.pack(anchor="w")
+
+        btn_dl = ctk.CTkButton(
+            top_row,
+            text="⬇️ Tải File .SRT",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            width=125,
+            height=30,
+            fg_color="#27ae60",
+            hover_color="#1e8449",
+            command=lambda it=item: self._start_sub_download(it)
+        )
+        btn_dl.grid(row=0, column=2, padx=(8, 0), sticky="e")
+
+        # Translation box for English subtitle
+        if item.lang == "en":
+            trans_box = ctk.CTkFrame(card, fg_color=("#e6edf5", "#1c2431"), corner_radius=6)
+            trans_box.grid(row=1, column=0, sticky="ew", padx=10, pady=(2, 8))
+            trans_box.grid_columnconfigure(0, weight=1)
+
+            hint_text = (
+                "⚠️ Video chỉ có phụ đề Tiếng Anh gốc. Bấm nút bên để dịch tự động sang Tiếng Việt và xuất file .srt:"
+                if only_en else
+                "💡 Bấm nút bên để tự động dịch phụ đề Tiếng Anh này sang Tiếng Việt và xuất file .srt:"
+            )
+
+            lbl_hint = ctk.CTkLabel(
+                trans_box,
+                text=hint_text,
+                font=ctk.CTkFont(size=11),
+                text_color=("#c0392b", "#f39c12") if only_en else ("gray40", "gray75"),
+                anchor="w",
+                justify="left"
+            )
+            lbl_hint.grid(row=0, column=0, sticky="w", padx=10, pady=6)
+
+            btn_trans = ctk.CTkButton(
+                trans_box,
+                text="🌐 Dịch sang Tiếng Việt (.srt)",
+                font=ctk.CTkFont(size=12, weight="bold"),
+                width=210,
+                height=30,
+                fg_color="#8e44ad",
+                hover_color="#732d91",
+                command=lambda it=item: self._start_sub_translation(it)
+            )
+            btn_trans.grid(row=0, column=1, padx=(6, 10), pady=6, sticky="e")
 
     def _create_yt_format_card(self, idx: int, item: YouTubeFormatItem):
         card = ctk.CTkFrame(
@@ -2170,7 +2419,8 @@ class VideoJoinerApp(DragDropCTk):
                     format_selector=item.format_selector,
                     output_filepath=save_path,
                     progress_callback=lambda p: self._event_queue.put(("yt_progress", p)),
-                    cancel_event=self.yt_cancel_event
+                    cancel_event=self.yt_cancel_event,
+                    cookiefile=self.yt_cookie_file
                 )
                 self._event_queue.put(("yt_complete", final_file))
             except DownloadCancelledException:
@@ -2179,6 +2429,134 @@ class VideoJoinerApp(DragDropCTk):
                 self._event_queue.put(("yt_error", str(e)))
 
         threading.Thread(target=dl_worker, daemon=True).start()
+
+    def _start_sub_download(self, item: YouTubeSubtitleItem):
+        if self.yt_is_downloading:
+            messagebox.showwarning("Thông báo", "Một tiến trình tải khác đang chạy. Vui lòng đợi hoàn tất.")
+            return
+
+        if not self.yt_current_info:
+            return
+
+        clean_title = sanitize_filename(self.yt_current_info.title)
+        if not clean_title:
+            clean_title = "youtube_subtitle"
+        default_file = f"{clean_title}_{item.lang}.srt"
+
+        default_dir = os.path.expanduser("~/Downloads")
+        if not os.path.isdir(default_dir):
+            default_dir = os.getcwd()
+
+        save_path = filedialog.asksaveasfilename(
+            title=f"Chọn nơi lưu phụ đề {item.label}",
+            initialdir=default_dir,
+            initialfile=default_file,
+            defaultextension=".srt",
+            filetypes=[("Phụ đề SRT (*.srt)", "*.srt")]
+        )
+        if not save_path:
+            return
+
+        if not save_path.lower().endswith(".srt"):
+            save_path += ".srt"
+
+        self.yt_is_downloading = True
+        self.yt_downloaded_file = None
+
+        self.yt_dl_card.grid(row=3, column=0, sticky="ew", padx=20, pady=(0, 10))
+        self.yt_lbl_dl_title.configure(
+            text=f"Đang tải phụ đề: {os.path.basename(save_path)} ({item.label})",
+            text_color=("black", "white")
+        )
+        self.yt_progress_bar.set(0.2)
+        self.yt_lbl_dl_details.configure(text="Đang kết nối tới máy chủ YouTube tải file phụ đề...")
+        self.yt_btn_cancel_dl.configure(state="disabled")
+
+        self.yt_btn_open_file.pack_forget()
+        self.yt_btn_open_folder.pack_forget()
+        self.yt_btn_cut_this_video.pack_forget()
+        self.yt_btn_add_to_joiner.pack_forget()
+
+        def sub_worker():
+            try:
+                final_file = download_youtube_subtitle(
+                    url=self.yt_current_info.url,
+                    lang_code=item.source_code,
+                    is_auto=item.is_auto,
+                    output_filepath=save_path,
+                    cookiefile=self.yt_cookie_file
+                )
+                self._event_queue.put(("yt_complete", final_file))
+            except Exception as e:
+                self._event_queue.put(("yt_error", str(e)))
+
+        threading.Thread(target=sub_worker, daemon=True).start()
+
+    def _start_sub_translation(self, item: YouTubeSubtitleItem):
+        if self.yt_is_downloading:
+            messagebox.showwarning("Thông báo", "Một tiến trình tải khác đang chạy. Vui lòng đợi hoàn tất.")
+            return
+
+        if not self.yt_current_info:
+            return
+
+        clean_title = sanitize_filename(self.yt_current_info.title)
+        if not clean_title:
+            clean_title = "youtube_subtitle"
+        default_file = f"{clean_title}_TiengViet.srt"
+
+        default_dir = os.path.expanduser("~/Downloads")
+        if not os.path.isdir(default_dir):
+            default_dir = os.getcwd()
+
+        save_path = filedialog.asksaveasfilename(
+            title="Chọn nơi lưu phụ đề Tiếng Việt đã dịch",
+            initialdir=default_dir,
+            initialfile=default_file,
+            defaultextension=".srt",
+            filetypes=[("Phụ đề SRT (*.srt)", "*.srt")]
+        )
+        if not save_path:
+            return
+
+        if not save_path.lower().endswith(".srt"):
+            save_path += ".srt"
+
+        self.yt_is_downloading = True
+        self.yt_downloaded_file = None
+
+        self.yt_dl_card.grid(row=3, column=0, sticky="ew", padx=20, pady=(0, 10))
+        self.yt_lbl_dl_title.configure(
+            text=f"Đang dịch phụ đề Tiếng Anh sang Tiếng Việt: {os.path.basename(save_path)}",
+            text_color=("black", "white")
+        )
+        self.yt_progress_bar.set(0.05)
+        self.yt_lbl_dl_details.configure(text="Đang tải phụ đề Tiếng Anh gốc từ YouTube...")
+        self.yt_btn_cancel_dl.configure(state="disabled")
+
+        self.yt_btn_open_file.pack_forget()
+        self.yt_btn_open_folder.pack_forget()
+        self.yt_btn_cut_this_video.pack_forget()
+        self.yt_btn_add_to_joiner.pack_forget()
+
+        def trans_worker():
+            try:
+                def prog(curr_pct, total_pct, msg):
+                    self._event_queue.put(("sub_trans_progress", (curr_pct / 100.0, msg)))
+
+                final_file = download_and_convert_en_to_vi_subtitle(
+                    url=self.yt_current_info.url,
+                    en_lang_code=item.source_code,
+                    is_auto=item.is_auto,
+                    output_filepath=save_path,
+                    progress_callback=prog,
+                    cookiefile=self.yt_cookie_file
+                )
+                self._event_queue.put(("yt_complete", final_file))
+            except Exception as e:
+                self._event_queue.put(("yt_error", str(e)))
+
+        threading.Thread(target=trans_worker, daemon=True).start()
 
     def _on_yt_download_progress(self, p: dict):
         if not self.yt_is_downloading:
@@ -2207,22 +2585,30 @@ class VideoJoinerApp(DragDropCTk):
         self.yt_progress_bar.set(1.0)
 
         fname = os.path.basename(final_path)
+        is_sub = fname.lower().endswith(".srt")
+
+        success_title = f"🎉 XUẤT PHỤ ĐỀ THÀNH CÔNG: {fname}" if is_sub else f"🎉 TẢI THÀNH CÔNG: {fname}"
         self.yt_lbl_dl_title.configure(
-            text=f"🎉 TẢI THÀNH CÔNG: {fname}",
+            text=success_title,
             text_color=("#27ae60", "#2ecc71")
         )
         self.yt_lbl_dl_details.configure(text=f"Đã lưu tại: {final_path}")
         self.yt_btn_cancel_dl.configure(state="disabled")
 
+        self.yt_btn_open_file.configure(text="📝 Xem File .SRT" if is_sub else "▶ Mở Xem")
         self.yt_btn_open_file.pack(side="left", padx=(0, 6))
         self.yt_btn_open_folder.pack(side="left", padx=(0, 6))
-        self.yt_btn_cut_this_video.pack(side="left", padx=(0, 6))
-        self.yt_btn_add_to_joiner.pack(side="left", padx=(0, 6))
 
-        ans = messagebox.askyesno(
-            "Tải YouTube Thành Công!",
+        if not is_sub:
+            self.yt_btn_cut_this_video.pack(side="left", padx=(0, 6))
+            self.yt_btn_add_to_joiner.pack(side="left", padx=(0, 6))
+
+        prompt_msg = (
+            f"Đã tải và xuất file phụ đề .SRT thành công:\n\n{final_path}\n\nBạn có muốn mở xem nội dung phụ đề ngay không?"
+            if is_sub else
             f"Đã tải video/âm thanh thành công:\n\n{final_path}\n\nBạn có muốn mở xem ngay không?"
         )
+        ans = messagebox.askyesno("Tải YouTube Thành Công!", prompt_msg)
         if ans:
             self._on_yt_open_file_clicked()
 
