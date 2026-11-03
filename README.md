@@ -26,15 +26,21 @@
 - **Hỗ trợ chọn Audio Track:** Giữ lại track âm thanh mong muốn hoặc tắt tiếng khi cắt.
 - **Tích hợp tiện lợi:** Sau khi cắt, có thể bấm **▶ Xem File Vừa Cắt**, **📂 Mở Thư Mục** hoặc **➕ Đưa Vào Ghép Video** để nối tiếp đoạn clip vừa cắt!
 
-### 3. 📥 Tải Video & Âm Thanh Từ YouTube
+### 3. 📥 Tải Video, Âm Thanh & Phụ Đề Từ YouTube
 - **Nhập link YouTube:** Hỗ trợ link video thường, shorts, youtu.be. Có nút dán nhanh từ clipboard và xóa link.
+- **Trích xuất phụ đề (Subtitles) - Định dạng chuẩn .SRT:**
+  - Tự động quét và lọc phụ đề **Tiếng Việt (`vi`)** và **Tiếng Anh (`en`)** (bao gồm phụ đề gốc của tác giả và phụ đề tự tạo bởi YouTube).
+  - Tải trực tiếp file phụ đề về máy **luôn ở định dạng `.srt` chuẩn** (tương thích mọi trình phát VLC, Windows Media Player, CapCut, Premiere...).
+  - **Dịch tự động sang Tiếng Việt (.srt):** Nếu video chỉ có phụ đề Tiếng Anh (hoặc với phụ đề Tiếng Anh), ngay bên dưới nút tải file sub sẽ có nút **`🌐 Dịch sang Tiếng Việt (.srt)`**. Khi click, hệ thống sẽ tự động tải, phân tích từng câu thoại theo millisecond, dịch chính xác sang Tiếng Việt và xuất ra file `.srt`.
 - **Hiển thị đầy đủ danh sách link tải:**
   - **Video MP4 chuẩn:** 4K Ultra HD, 2K, 1080p Full HD, 720p HD, 480p, 360p (tự động ghép video + âm thanh chất lượng tốt nhất).
   - **Chỉ Âm thanh:** Tách riêng âm thanh M4A / AAC / MP3 gốc chất lượng cao cho nhạc, podcast.
+  - **Phụ đề (Subtitles):** Tab riêng để dễ dàng tìm kiếm và tải phụ đề.
   - **Luồng trực tiếp (Direct Streams):** Hiển thị chi tiết từng luồng video/audio cùng link download trực tiếp (hỗ trợ copy link dán vào IDM hoặc trình duyệt).
-- **Tải về máy chỉ với 1 click:** Nhấn nút **⬇️ Tải Về Máy**, chọn thư mục lưu và ứng dụng sẽ tự động tải về.
-- **Theo dõi tiến trình trực quan:** Xem % tiến trình, dung lượng đã tải, tốc độ tải (MB/s), thời gian còn lại (ETA).
-- **Tích hợp sau khi tải:** Mở xem video, mở thư mục, bấm **✂️ Cắt Video Này** để rút gọn ngay, hoặc **➕ Đưa Vào Ghép Video**!
+- **Vượt chặn YouTube Bot Check ("Sign in to confirm you're not a bot"):** Hỗ trợ nạp file `cookies.txt` (tự động nhận diện cookie từ file hoặc nút nạp nhanh trên giao diện).
+- **Tải về máy chỉ với 1 click:** Nhấn nút **⬇️ Tải Về Máy** / **⬇️ Tải File .SRT**, chọn thư mục lưu và ứng dụng sẽ tự động tải về.
+- **Theo dõi tiến trình trực quan:** Xem % tiến trình, dung lượng đã tải, tốc độ tải (MB/s), tiến độ dịch phụ đề.
+- **Tích hợp sau khi tải:** Mở xem video, mở thư mục, mở xem file `.srt`, bấm **✂️ Cắt Video Này** để rút gọn ngay, hoặc **➕ Đưa Vào Ghép Video**!
 
 ---
 
