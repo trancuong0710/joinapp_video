@@ -35,6 +35,8 @@ def extract_youtube_info(
         'skip_download': True,
         'noplaylist': True,
         'extract_flat': False,
+        'socket_timeout': 15,
+        'retries': 5,
         'logger': YtDlpNullLogger(),
     }
 
@@ -118,7 +120,7 @@ def extract_youtube_info(
                 fps_val = v.get('fps')
                 direct_u = v.get('url')
 
-            selector = f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<={height}]+bestaudio/best[height<={height}]/best"
+            selector = f"bestvideo[height={height}]+bestaudio/bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<={height}]+bestaudio/best[height<={height}]/best"
             
             format_items.append(YouTubeFormatItem(
                 format_id=f"preset_{height}p",
@@ -356,6 +358,16 @@ def download_youtube_video(
         'progress_hooks': [ytdl_progress_hook],
         'noplaylist': True,
         'logger': YtDlpNullLogger(),
+        # Tối ưu hóa tốc độ tải tối đa (Multi-threading & Anti-throttling)
+        'concurrent_fragment_downloads': 8,     # Tải song song 8 phân đoạn video cùng lúc
+        'http_chunk_size': 10485760,           # Chunks 10 MB phá vỡ giới hạn bóp băng thông YouTube
+        'buffersize': 1024 * 1024,              # Buffer đệm 1 MB tăng tốc ghi ổ đĩa
+        'retries': 10,                          # Tự động kết nối lại khi mạng chập chờn
+        'fragment_retries': 10,
+        'socket_timeout': 20,
+        'postprocessor_args': {
+            'ffmpeg': ['-movflags', '+faststart']
+        }
     }
 
     if shutil.which("node"):

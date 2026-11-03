@@ -143,6 +143,8 @@ def download_youtube_subtitle(
         'outtmpl': out_tmpl,
         'quiet': True,
         'no_warnings': True,
+        'socket_timeout': 15,
+        'retries': 5,
         'logger': YtDlpNullLogger(),
     }
 
@@ -216,6 +218,8 @@ def download_and_convert_en_to_vi_subtitle(
         'outtmpl': out_tmpl,
         'quiet': True,
         'no_warnings': True,
+        'socket_timeout': 15,
+        'retries': 5,
         'logger': YtDlpNullLogger(),
     }
 
