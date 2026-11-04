@@ -148,6 +148,24 @@ class VideoMerger:
                     pass
                 self._temp_parts_dir = None
 
+    def _determine_target_timescale(self, videos: List[VideoInfo]) -> int:
+        """
+        Determines the optimal unified video track timescale for zero-copy concatenation.
+        Prevents container timescale mismatch bugs where video plays at 2x speed or desyncs.
+        """
+        valid_timescales = [v.timescale for v in videos if v.timescale > 0]
+        if valid_timescales and all(ts == valid_timescales[0] for ts in valid_timescales):
+            return valid_timescales[0]
+
+        max_fps = max((v.fps for v in videos), default=25.0)
+        if 24.0 <= max_fps <= 26.0:
+            return 25000
+        elif 29.0 <= max_fps <= 31.0:
+            return 30000
+        elif 59.0 <= max_fps <= 61.0:
+            return 60000
+        return 90000
+
     def _can_direct_concat(self, videos: List[VideoInfo]) -> bool:
         """Check if all videos are already 100% compatible for instant zero-temp-file concat."""
         if len(videos) < 2:
@@ -157,6 +175,12 @@ class VideoMerger:
         v0 = videos[0]
         for v in videos[1:]:
             if v.codec != v0.codec or v.width != v0.width or v.height != v0.height:
+                return False
+            # If timescale differs, direct concat without timescale normalization will corrupt packet timestamps!
+            if v0.timescale > 0 and v.timescale > 0 and v.timescale != v0.timescale:
+                return False
+            # If FPS difference exceeds threshold, direct concat is not safe
+            if abs(v.fps - v0.fps) > 0.05:
                 return False
         if not all(v.has_audio and v.selected_audio_idx == 0 for v in videos):
             return False
@@ -230,12 +254,13 @@ class VideoMerger:
                     on_complete(output_path)
                 return
 
-        # OPTIMIZATION 2: Parallel Multi-Threaded Audio Normalization
+        # OPTIMIZATION 2: Parallel Multi-Threaded Audio & Video Timescale Normalization
         self._temp_parts_dir = tempfile.mkdtemp(prefix="join_parts_")
         total_steps = len(videos) + 1
+        target_timescale = self._determine_target_timescale(videos)
 
         if on_log:
-            on_log("⚡ BẮT ĐẦU CHẾ ĐỘ NỐI SIÊU TỐC (Stream Copy + Chuẩn hóa âm thanh Stereo đa luồng)!")
+            on_log(f"⚡ BẮT ĐẦU CHẾ ĐỘ NỐI SIÊU TỐC (Stream Copy + Chuẩn hóa nhịp thời gian {target_timescale}Hz đa luồng)!")
             on_log(f"🎬 Số lượng video: {len(videos)} | Tổng thời lượng: {format_seconds(total_duration)}")
             cpu_cores = os.cpu_count() or 4
             on_log(f"🔥 Xử lý song song đồng thời trên {min(8, cpu_cores)} luồng CPU...")
@@ -260,6 +285,7 @@ class VideoMerger:
                     "-map", "0:v:0",
                     "-map", f"0:a:{track.audio_index}",
                     "-c:v", "copy",
+                    "-video_track_timescale", str(target_timescale),
                     "-c:a", "aac",
                     "-b:a", config.audio_bitrate,
                     "-ac", "2",
@@ -271,6 +297,7 @@ class VideoMerger:
                     "-map", "0:v:0",
                     "-map", "1:a",
                     "-c:v", "copy",
+                    "-video_track_timescale", str(target_timescale),
                     "-c:a", "aac",
                     "-b:a", config.audio_bitrate,
                     "-ac", "2",
