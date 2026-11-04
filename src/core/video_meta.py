@@ -71,6 +71,8 @@ class VideoInfo:
     audio_tracks: List[AudioTrackInfo] = field(default_factory=list)
     selected_audio_idx: int = 0  # index in audio_tracks; -1 means Mute (no audio)
     thumbnail_path: Optional[str] = None
+    time_base: str = ""
+    timescale: int = 0
 
     @property
     def has_audio(self) -> bool:
@@ -131,12 +133,20 @@ def probe_video(file_path: str, temp_thumb_dir: Optional[str] = None) -> VideoIn
     height = 0
     fps = 30.0
     vcodec = "unknown"
+    time_base = ""
+    timescale = 0
 
     if video_stream:
         width = int(video_stream.get("width", 0))
         height = int(video_stream.get("height", 0))
         fps = parse_fps(video_stream.get("r_frame_rate", video_stream.get("avg_frame_rate", "30/1")))
         vcodec = video_stream.get("codec_name", "unknown")
+        time_base = str(video_stream.get("time_base", ""))
+        if "/" in time_base:
+            try:
+                timescale = int(time_base.split("/")[1])
+            except Exception:
+                timescale = 0
         if duration <= 0:
             try:
                 duration = float(video_stream.get("duration", 0.0))
@@ -225,6 +235,8 @@ def probe_video(file_path: str, temp_thumb_dir: Optional[str] = None) -> VideoIn
         codec=vcodec,
         audio_tracks=parsed_audio_tracks,
         selected_audio_idx=selected_idx,
-        thumbnail_path=thumb_path
+        thumbnail_path=thumb_path,
+        time_base=time_base,
+        timescale=timescale
     )
 
